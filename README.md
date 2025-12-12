@@ -1,2 +1,2 @@
-# dev_tuicore
+![tuicore](logo.png)
 Lua scriptable TUI rendering engine written in Odin. 
