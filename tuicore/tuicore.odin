@@ -1,10 +1,14 @@
 package main
 
-// Phase 2 PoC:
-// - Lua gets: draw.clear({r,g,b,a}) and draw.cell(col,row,{r,g,b,a})
-// - Lua gets globals: TERM_COLS / TERM_ROWS
-// - Fake cell size constants (no font yet)
-// - No safety / clamping / strictness: raw casts only
+// Phase 3A (clean):
+// - SDL_ttf init + load 4 faces (regular/bold/italic/bold-italic)
+// - Derive cell metrics from the regular face (no glyph drawing yet)
+// - Resize updates TERM_COLS/TERM_ROWS via window events (no per-frame polling)
+//
+// Lua API remains:
+// - draw.clear({r,g,b,a})
+// - draw.cell(col,row,{r,g,b,a})
+// - globals: TERM_COLS / TERM_ROWS
 
 import lua      "luajit"
 import os       "core:os"
@@ -13,20 +17,29 @@ import strings  "core:strings"
 import filepath "core:path/filepath"
 import c        "core:c"
 import sdl      "vendor:sdl2"
+import ttf      "vendor:sdl2/ttf"
 
 
-CELL_W :: i32(16)
-CELL_H :: i32(16)
+// Globals (not const; later you can override from Lua before font load)
+Font_Paths: [4]string = [4]string{
+	"C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Regular.ttf",
+	"C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Bold.ttf",
+	"C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Italic.ttf",
+	"C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-BoldItalic.ttf",
+}
+
+// 0=regular, 1=bold, 2=italic, 3=bold-italic
+Active_Font: [4]^ttf.Font = {}
+
+Font_Size: c.int = 8
+
 
 Cell_Canvas_State: struct {
 	cell_w, cell_h: i32,
 	win_w, win_h: i32,
 	cols, rows: i32,
 	canvas_w, canvas_h: i32,
-} = {
-	cell_w = CELL_W,
-	cell_h = CELL_H,
-}
+} = {}
 
 // Renderer target for Lua draw calls (single renderer, single window).
 G_Renderer: ^sdl.Renderer = nil
@@ -58,8 +71,6 @@ get_time_seconds :: proc() -> f64 {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helper (contextless): read {r,g,b,a} as raw bytes
-// - raw casts only
-// - if a is missing, default to 255 so things are visible
 // ─────────────────────────────────────────────────────────────────────────────
 
 read_rgba_table :: proc "contextless" (L: ^lua.State, idx: c.int) -> (u8, u8, u8, u8) {
@@ -95,7 +106,6 @@ read_rgba_table :: proc "contextless" (L: ^lua.State, idx: c.int) -> (u8, u8, u8
 // ─────────────────────────────────────────────────────────────────────────────
 
 lua_draw_clear :: proc "c" (L: ^lua.State) -> c.int {
-	// draw.clear({r,g,b,a}?)  -- optional, defaults to black
 	r: u8 = 0
 	g: u8 = 0
 	b: u8 = 0
@@ -115,7 +125,6 @@ lua_draw_clear :: proc "c" (L: ^lua.State) -> c.int {
 }
 
 lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
-	// draw.cell(col, row, {r,g,b,a})
 	col := cast(i32)(lua.L_checkinteger(L, 1))
 	row := cast(i32)(lua.L_checkinteger(L, 2))
 	lua.L_checktype(L, 3, .TABLE)
@@ -143,7 +152,6 @@ lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 }
 
 bind_draw_api :: proc(L: ^lua.State) {
-	// draw = { clear=..., cell=... }
 	lua.newtable(L)
 
 	lua.pushcfunction(L, lua_draw_clear)
@@ -222,9 +230,43 @@ main :: proc() {
 	}
 	defer delete(main_cstr)
 
-
 	assert(sdl.Init(sdl.INIT_VIDEO) == 0, sdl.GetErrorString())
 	defer sdl.Quit()
+
+	// Phase 3A: SDL_ttf + 4 faces + real cell metrics.
+	assert(ttf.Init() == 0, string(ttf.GetError()))
+	defer ttf.Quit()
+
+	defer {
+		for i in 0..<4 {
+			if Active_Font[i] != nil {
+				ttf.CloseFont(Active_Font[i])
+				Active_Font[i] = nil
+			}
+		}
+	}
+
+	for i in 0..<4 {
+		p, perr := strings.clone_to_cstring(Font_Paths[i])
+		if perr != .None {
+			fmt.printf("Qterm: clone_to_cstring font path failed: %v\n", perr)
+			return
+		}
+		Active_Font[i] = ttf.OpenFont(p, Font_Size)
+		delete(p)
+		assert(Active_Font[i] != nil, string(ttf.GetError()))
+	}
+
+	// Derive cell metrics from regular face (index 0).
+	{
+		Cell_Canvas_State.cell_h = cast(i32)(ttf.FontLineSkip(Active_Font[0]))
+		assert(Cell_Canvas_State.cell_h > 0, "TTF FontLineSkip <= 0")
+
+		minx, maxx, miny, maxy, advance: c.int
+		assert(ttf.GlyphMetrics32(Active_Font[0], 'M', &minx, &maxx, &miny, &maxy, &advance) == 0, string(ttf.GetError()))
+		Cell_Canvas_State.cell_w = cast(i32)(advance)
+		assert(Cell_Canvas_State.cell_w > 0, "TTF GlyphMetrics advance <= 0")
+	}
 
 	window := sdl.CreateWindow(
 		"Qterm",
@@ -240,7 +282,6 @@ main :: proc() {
 	defer sdl.DestroyRenderer(renderer)
 
 	G_Renderer = renderer
-
 
 	L := (^lua.State)(lua.L_newstate())
 	if L == nil {
@@ -280,14 +321,10 @@ main :: proc() {
 		for sdl.PollEvent(&event) {
 			if event.type == .QUIT {
 				running = false
-			}
-		}
-
-		// Recompute on resize + resync globals.
-		{
-			w, h: i32
-			sdl.GetWindowSize(window, &w, &h)
-			if w != Cell_Canvas_State.win_w || h != Cell_Canvas_State.win_h {
+			} else if event.type == .WINDOWEVENT {
+				// No per-frame polling: recompute on any window event (cheap + correct).
+				w, h: i32
+				sdl.GetWindowSize(window, &w, &h)
 				recompute_cell_canvas(w, h)
 				sync_term_globals(L)
 			}

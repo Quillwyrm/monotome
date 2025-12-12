@@ -1,3 +1,57 @@
+## Phase 3 breakdown (tuicore)
+
+### Phase 3A — Fonts + real cell metrics (no glyph drawing yet)
+
+* Init/quit SDL_ttf.
+* Load 4 faces from hardcoded paths: reg/bold/ital/boldital.
+* Replace `CELL_W/CELL_H` with font-derived:
+
+  * `cell_h` from font line height/line skip
+  * `cell_w` from monospace advance (from glyph metrics)
+* Keep Phase 2 API as-is (`draw.clear`, `draw.cell`, `TERM_COLS/TERM_ROWS`).
+
+Done when: resizing updates `TERM_COLS/TERM_ROWS` based on real font metrics.
+
+---
+
+### Phase 3B — `draw.glyph` naive (no cache)
+
+* Add `draw.glyph(col,row, codepoint, color[,face])`.
+* Each call: rasterize glyph → make texture → blit → destroy (slow but simple).
+* Get baseline placement looking right inside the cell.
+
+Done when: you can draw a few glyphs (ASCII + a non-ASCII codepoint) and they sit correctly.
+
+---
+
+### Phase 3C — Cache without atlas (per-glyph textures)
+
+* Add per-face map: `codepoint -> texture`.
+* First use builds the glyph texture; later frames reuse it.
+* Still no atlas pages.
+
+Done when: repeated frames don’t rebuild glyph textures and performance stops being obviously awful.
+
+---
+
+### Phase 3D — Proper atlas pages (on-demand, fixed-slot)
+
+* Replace per-glyph textures with atlas pages:
+
+  * allocate pages as needed
+  * fixed-slot packing (slot size = cell size)
+  * map `codepoint -> (page, slot)`
+* On miss: rasterize once → copy into atlas slot → discard temp surface/texture.
+
+Done when: only a few atlas textures exist; all glyph draws are atlas blits after first use.
+
+Non-goals across Phase 3: no UTF-8 string decoding yet (codepoint ints are fine), no eviction, no padding/scaling pipeline, no terminal emulation.
+
+---
+---
+---
+
+
 Alright, let’s turn the mess in both our heads into a clean roadmap.
 
 I’ll treat what you *already* have as **Phase 0**, then stack everything on top in small, testable layers.
