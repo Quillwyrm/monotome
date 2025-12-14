@@ -38,7 +38,7 @@ import c        "core:c"
 // -----------------------------------------------------------------------------
 
 // User-facing font size (UI points, typical editor UX).
-Font_Pt: c.int = 8
+Font_Pt: c.int = 18
 
 // Internal raster size passed to LoadFontEx (computed at startup).
 Font_Px: c.int
@@ -326,7 +326,6 @@ call_lua_noargs :: proc(L: ^lua.State, name: cstring) -> bool {
 	ok := lua.pcall(L, 0, 0, cast(c.int)(errfunc)) == lua.Status.OK
 	if !ok {
 		err := lua.tostring(L, -1)
-		if err == nil { err = cstring("(non-string Lua error)") }
 		fmt.printf("Lua error in %s:\n%s\n", name, err)
 	}
 
@@ -346,7 +345,6 @@ call_lua_number :: proc(L: ^lua.State, name: cstring, x: f64) -> bool {
 	ok := lua.pcall(L, 1, 0, cast(c.int)(errfunc)) == lua.Status.OK
 	if !ok {
 		err := lua.tostring(L, -1)
-		if err == nil { err = cstring("(non-string Lua error)") }
 		fmt.printf("Lua error in %s:\n%s\n", name, err)
 	}
 
@@ -371,11 +369,9 @@ main :: proc() {
 	// baseline: 96 dpi, 1pt = 1/72 inch => px = pt * 96/72 = pt * 4/3
 	s := rl.GetWindowScaleDPI()
 	scale := s[0]
-	if scale <= 0.0 { scale = 1.0 }
 
 	px_f := cast(f32)(Font_Pt) * (4.0 / 3.0) * scale
 	Font_Px = cast(c.int)(px_f + 0.5)
-	if Font_Px < 1 { Font_Px = 1 }
 
 	// Build baked codepoint lists from baselines:
 	// - Face 0: BASE_CODEPOINTS + REGULAR_CODEPOINTS
@@ -417,7 +413,7 @@ main :: proc() {
 	Cell_W = cast(i32)(max_adv)
 
 	Cell_H = cast(i32)(Active_Font[0].baseSize)
-	if Cell_H <= 0 { Cell_H = 1 }
+	// Invariant: Cell_H > 0 by construction (font baseSize is expected > 0).
 
 	// Lua state.
 	L := lua.L_newstate()
@@ -445,7 +441,6 @@ main :: proc() {
 
 	if lua.L_dofile(L, main_cstr) != lua.Status.OK {
 		err := lua.tostring(L, -1)
-		if err == nil { err = cstring("(Lua load error)") }
 		fmt.printf("Lua load error:\n%s\n", err)
 		lua.settop(L, 0)
 		return
