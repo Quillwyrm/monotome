@@ -1,215 +1,330 @@
--- main.lua (LuaJIT-safe cyberpunk stress test)
--- Pushes: full-screen backgrounds + matrix rain + HUD + bursts.
--- Uses only: ASCII + box/block glyphs your bake list already includes.
+-- main.lua
+-- no-vim: mock editor benchmark scene (cell background + glyph foreground)
+--
+-- Goal:
+-- - hammer draw.cell + draw.glyph in a way that resembles a real editor UI
+-- - left tree panel, top bar, status bar, code view, minimap-ish gutter
+-- - lots of repeated patterns + some scrolling + a blinking cursor
+--
+-- Notes:
+-- - Uses UTF-8 safe iteration for drawing strings.
+-- - Assumes TERM_COLS / TERM_ROWS are provided by tuicore.
 
 local t = 0
 
-local cols, rows = 0, 0
-local head = {}
-local speed = {}
-local seed = {}
+local function rgba(r,g,b,a) return {r,g,b,a or 255} end
 
-local function clamp(x, a, b)
-  if x < a then return a end
-  if x > b then return b end
-  return x
-end
-
-local function rgba(r,g,b,a)
-  return { clamp(r,0,255), clamp(g,0,255), clamp(b,0,255), a or 255 }
-end
-
--- cheap integer-ish RNG (LCG) that works fine on LuaJIT numbers
-local function lcg(s)
-  -- constants chosen for decent scatter
-  s = (s * 1664525 + 1013904223) % 4294967296
-  return s
-end
-
-local RAIN = "abcdefghijklmnopqrstuvwxyz0123456789@#$%&*+?;:,.=<>[]{}()\\|/"
-
-local function putstr(x, y, col, s, face)
-  for i = 1, #s do
-    draw.glyph(x + (i-1), y, col, s:sub(i,i), face or 0)
+-- UTF-8 iterator (codepoint by codepoint, not byte slicing)
+local function utf8_iter(s)
+  local i, n = 1, #s
+  return function()
+    if i > n then return nil end
+    local c = s:byte(i)
+    local len
+    if c < 0x80 then len = 1
+    elseif c < 0xE0 then len = 2
+    elseif c < 0xF0 then len = 3
+    else len = 4 end
+    local ch = s:sub(i, i + len - 1)
+    i = i + len
+    return ch
   end
 end
 
-local function frame(x0,y0,x1,y1,col,face)
-  if x1 <= x0 or y1 <= y0 then return end
-  draw.glyph(x0,y0,col,"┌",face); draw.glyph(x1,y0,col,"┐",face)
-  draw.glyph(x0,y1,col,"└",face); draw.glyph(x1,y1,col,"┘",face)
-  for x = x0+1, x1-1 do
-    draw.glyph(x,y0,col,"─",face)
-    draw.glyph(x,y1,col,"─",face)
-  end
-  for y = y0+1, y1-1 do
-    draw.glyph(x0,y,col,"│",face)
-    draw.glyph(x1,y,col,"│",face)
+local function clamp(v, lo, hi)
+  if v < lo then return lo end
+  if v > hi then return hi end
+  return v
+end
+
+local function draw_text(x, y, col, s, face, max_cols)
+  face = face or 0
+  local cx = x
+  local limit = max_cols or 10^9
+  for ch in utf8_iter(s) do
+    if cx - x >= limit then break end
+    draw.glyph(cx, y, col, ch, face)
+    cx = cx + 1
   end
 end
 
-local function resize_state()
-  cols = TERM_COLS or 0
-  rows = TERM_ROWS or 0
-
-  head, speed, seed = {}, {}, {}
-  if cols <= 0 or rows <= 0 then return end
-
-  for x = 0, cols-1 do
-    local s = (x+1) * 1337 + 12345
-    seed[x]  = s % 4294967296
-    head[x]  = (s % rows)
-    speed[x] = 8 + (s % 24) -- 8..31 cells/sec
+local function fill_rect(x0, y0, w, h, col)
+  for y = y0, y0 + h - 1 do
+    for x = x0, x0 + w - 1 do
+      draw.cell(x, y, col)
+    end
   end
 end
+
+local function hline(x0, y, w, col, ch)
+  ch = ch or "─"
+  for x = x0, x0 + w - 1 do
+    draw.glyph(x, y, col, ch, 0)
+  end
+end
+
+local function vline(x, y0, h, col, ch)
+  ch = ch or "│"
+  for y = y0, y0 + h - 1 do
+    draw.glyph(x, y, col, ch, 0)
+  end
+end
+
+local function box(x0, y0, w, h, col)
+  if w < 2 or h < 2 then return end
+  draw.glyph(x0,     y0,     col, "┌", 0)
+  draw.glyph(x0+w-1, y0,     col, "┐", 0)
+  draw.glyph(x0,     y0+h-1, col, "└", 0)
+  draw.glyph(x0+w-1, y0+h-1, col, "┘", 0)
+  hline(x0+1, y0,     w-2, col, "─")
+  hline(x0+1, y0+h-1, w-2, col, "─")
+  vline(x0,     y0+1, h-2, col, "│")
+  vline(x0+w-1, y0+1, h-2, col, "│")
+end
+
+-- Cheap pseudo-rand (deterministic) - LuaJIT bitops (Lua 5.1)
+local bit = bit or require("bit")
+local bxor   = bit.bxor
+local lshift = bit.lshift
+local rshift = bit.rshift
+local tobit  = bit.tobit
+
+local function hash(n)
+  n = tobit(n)
+  n = bxor(n, lshift(n, 13))
+  n = bxor(n, rshift(n, 17))
+  n = bxor(n, lshift(n, 5))
+  return n
+end
+
+local function pick(list, n)
+  return list[(n % #list) + 1]
+end
+
+-- ---------------------------------------------------------------------
 
 function init_terminal()
   t = 0
-  resize_state()
 end
 
 function update_terminal(dt)
   t = t + (dt or 0)
-
-  local c = TERM_COLS or 0
-  local r = TERM_ROWS or 0
-  if c ~= cols or r ~= rows then
-    resize_state()
-  end
-
-  if cols <= 0 or rows <= 0 then return end
-
-  for x = 0, cols-1 do
-    -- wobble speed a bit without bit ops
-    local s = seed[x]
-    s = lcg(s + math.floor(t*60))
-    seed[x] = s
-    local wob = (s % 1000) / 1000
-
-    local v = speed[x] * (0.85 + 0.30*wob)
-    head[x] = (head[x] + v * (dt or 0)) % rows
-  end
 end
+
+-- ---------------------------------------------------------------------
+-- UI model (static-ish content)
+-- ---------------------------------------------------------------------
+
+local tree_items = {
+  "no-vim/",
+  "  src/",
+  "    main.lua",
+  "    editor.lua",
+  "    render.lua",
+  "    buffer.lua",
+  "    utf8.lua",
+  "  docs/",
+  "    spec.md",
+  "    roadmap.md",
+  "  assets/",
+  "    icon.ttf",
+  "  README.md",
+}
+
+local code_lines = {
+  "local function draw_glyph(x, y, fg, ch, face)",
+  "  -- crop to cell to prevent bleed/overlap",
+  "  -- face fallback: only BASE_CODEPOINTS use italic/bold",
+  "  -- everything else forced to regular to guarantee glyph presence",
+  "  if not is_base_codepoint(ch) then face = 0 end",
+  "  return blit(ch, x, y, fg, face)",
+  "end",
+  "",
+  "local function paint_editor()",
+  "  draw_status(\"no-vim\", \"NORMAL\", cursor, diagnostics)",
+  "  draw_tree(tree, selection)",
+  "  draw_doc(buffer, scroll, cursor)",
+  "end",
+  "",
+  "-- UTF-8 note: never byte-slice strings",
+  "for ch in utf8_iter(s) do",
+  "  draw.glyph(cx, y, fg, ch, face)",
+  "end",
+}
+
+local keywords = {
+  ["local"]=true, ["function"]=true, ["end"]=true, ["if"]=true, ["then"]=true,
+  ["for"]=true, ["in"]=true, ["do"]=true, ["return"]=true, ["not"]=true,
+}
+
+local function color_token(tok)
+  if keywords[tok] then return rgba(255, 130, 140) end
+  if tok:match("^%-%-") then return rgba(120, 200, 140) end
+  if tok:match("^\"") or tok:match("^'") then return rgba(140, 220, 255) end
+  if tok:match("^%d") then return rgba(255, 210, 140) end
+  return rgba(220, 220, 220)
+end
+
+local function tokenize(line)
+  -- super dumb tokenizer: split by spaces, keep punctuation attached.
+  local out = {}
+  for tok in line:gmatch("%S+") do
+    out[#out+1] = tok
+  end
+  return out
+end
+
+-- ---------------------------------------------------------------------
+-- Drawing
+-- ---------------------------------------------------------------------
 
 function draw_terminal()
-  draw.clear(rgba(6,6,10,255))
+  local cols = TERM_COLS or 0
+  local rows = TERM_ROWS or 0
   if cols <= 0 or rows <= 0 then return end
 
-  local deep  = rgba(6,6,10,255)
-  local bgA   = rgba(10,10,18,255)
-  local bgB   = rgba(14,12,24,255)
+  -- Layout
+  local top_h = 2
+  local status_h = 1
+  local tree_w = clamp(math.floor(cols * 0.28), 18, 36)
+  local gutter_w = 6
+  local minimap_w = 8
 
-  local cyan  = rgba(80,255,240,255)
-  local mag   = rgba(255,80,220,255)
-  local lime  = rgba(80,255,120,255)
-  local white = rgba(240,240,255,255)
+  local content_y0 = top_h
+  local content_y1 = rows - status_h
+  local content_h  = content_y1 - content_y0
 
-  -- background: scanlines + shimmer bands (heavy)
-  local band1 = math.floor((math.sin(t*0.8)*0.5 + 0.5) * (rows-1))
-  local band2 = math.floor((math.sin(t*1.3+1.7)*0.5 + 0.5) * (rows-1))
+  local tree_x0 = 0
+  local tree_x1 = tree_w
 
-  for y = 0, rows-1 do
-    local scan = ((y + math.floor(t*50)) % 6) == 0
-    local u = 0.10
-    if y == band1 then u = 0.75
-    elseif y == band2 then u = 0.55
-    elseif scan then u = 0.22
+  local doc_x0 = tree_x1
+  local doc_x1 = cols - minimap_w
+  local doc_w  = doc_x1 - doc_x0
+
+  local mini_x0 = cols - minimap_w
+
+  -- Colors (cyber-ish)
+  local bg        = rgba(7, 8, 10)
+  local panel_bg  = rgba(10, 11, 16)
+  local panel_bg2 = rgba(12, 13, 20)
+  local bar_bg    = rgba(18, 16, 24)
+  local status_bg = rgba(14, 14, 18)
+  local border    = rgba(80, 90, 120)
+  local accent    = rgba(120, 255, 220)
+  local warn      = rgba(255, 190, 120)
+  local err       = rgba(255, 120, 140)
+  local dim       = rgba(120, 130, 150)
+  local text      = rgba(220, 220, 220)
+
+  -- Base clear
+  draw.clear(bg)
+
+  -- Base layer: fill panels (cells)
+  fill_rect(0, 0, cols, rows, bg)
+  fill_rect(0, 0, cols, top_h, bar_bg)
+  fill_rect(0, rows-status_h, cols, status_h, status_bg)
+
+  fill_rect(tree_x0, content_y0, tree_w, content_h, panel_bg)
+  fill_rect(doc_x0,  content_y0, doc_w,  content_h, panel_bg2)
+  fill_rect(mini_x0, content_y0, minimap_w, content_h, panel_bg)
+
+  -- Panel separators (glyph)
+  vline(tree_x1-1, content_y0, content_h, border, "│")
+  vline(doc_x1,    content_y0, content_h, border, "│")
+  hline(0, top_h-1, cols, border, "─")
+  hline(0, rows-status_h, cols, border, "─")
+
+  -- Top bar text
+  draw_text(2, 0, accent, "no-vim", 1)
+  draw_text(10, 0, dim, "  a monospace editor with a mouse", 0)
+  draw_text(cols-28, 0, warn, "CTRL+P  Find File", 0)
+
+  -- Fake tabs
+  local tab = "[main.lua]"
+  draw_text(2, 1, rgba(255,255,255), tab, 0)
+  draw_text(2 + #tab + 2, 1, dim, "[editor.lua] [buffer.lua]", 0)
+
+  -- Tree view
+  draw_text(2, content_y0, dim, "PROJECT", 0)
+  local tree_scroll = math.floor((math.sin(t*0.6)*0.5+0.5) * 3)
+  for i=1, #tree_items do
+    local y = content_y0 + 2 + (i-1) - tree_scroll
+    if y >= content_y0+1 and y < content_y1-1 then
+      local line = tree_items[i]
+      local col = (i == 3) and accent or text
+      draw_text(1, y, col, line, 0, tree_w-2)
+    end
+  end
+
+  -- Document gutter + code
+  local scroll = math.floor((t*6) % 1000)
+  local first_line = scroll
+  local cursor_line = first_line + math.floor(content_h * 0.45)
+  local cursor_col  = 20 + math.floor((math.sin(t*2.0)*0.5+0.5) * 16)
+
+  draw_text(doc_x0+2, content_y0, dim, "main.lua", 0)
+
+  for row=0, content_h-2 do
+    local y = content_y0 + 1 + row
+    if y >= content_y1 then break end
+
+    local line_no = first_line + row + 1
+    local ln = string.format("%4d", line_no)
+    draw_text(doc_x0, y, dim, ln, 0, gutter_w-1)
+    draw.glyph(doc_x0+gutter_w-1, y, border, "│", 0)
+
+    local src = code_lines[(line_no % #code_lines) + 1]
+    local toks = tokenize(src)
+
+    local x = doc_x0 + gutter_w + 1
+    for _,tok in ipairs(toks) do
+      local c = color_token(tok)
+      draw_text(x, y, c, tok, 0)
+      x = x + #tok + 1
+      if x >= doc_x1-2 then break end
+      draw.glyph(x-1, y, text, " ", 0)
     end
 
-    local row = (u > 0.5) and bgB or bgA
-    for x = 0, cols-1 do
-      if ((x + y) % 2) == 0 then
-        draw.cell(x,y,row)
-      else
-        draw.cell(x,y,deep)
-      end
+    if (line_no % 19) == 0 then
+      draw_text(doc_x1-22, y, err, "!! type mismatch", 0)
+    elseif (line_no % 23) == 0 then
+      draw_text(doc_x1-20, y, warn, "!! unused var", 0)
+    end
+  end
+
+  -- Cursor (blink)
+  local blink = (math.floor(t*2) % 2) == 0
+  if blink then
+    local cx = doc_x0 + gutter_w + 1 + cursor_col
+    local cy = content_y0 + 1 + (cursor_line - first_line)
+    if cy >= content_y0+1 and cy < content_y1-1 and cx < doc_x1-1 then
+      draw.cell(cx, cy, rgba(255,255,255,40))
+      draw.glyph(cx, cy, rgba(255,255,255), "█", 0)
     end
   end
 
-  -- matrix rain (glyph heavy)
-  for x = 0, cols-1 do
-    local hy = math.floor(head[x])
-    local s = seed[x]
-    local tail = 12 + (s % 20)
-
-    for i = 0, tail do
-      local yy = (hy - i) % rows
-
-      s = lcg(s + yy*733 + x*97 + math.floor(t*30))
-      local idx = (s % #RAIN) + 1
-      local ch = RAIN:sub(idx, idx)
-
-      local f = 1.0 - (i / (tail+1))
-      f = f*f
-
-      local col
-      if i == 0 then col = white
-      elseif i < 3 then col = rgba(160,255,200,255)
-      else
-        col = rgba(
-          math.floor(lerp(6,  80, f) + 0.5),
-          math.floor(lerp(6, 255, f) + 0.5),
-          math.floor(lerp(10,120, f) + 0.5),
-          255
-        )
-      end
-
-      draw.glyph(x, yy, col, ch, 0)
+  -- Minimap-ish: dense columns of block chars
+  local blocks = {"░","▒","▓","█"}
+  for y = content_y0, content_y1-1 do
+    for x = mini_x0, cols-1 do
+      local n = hash((x+1)*1315423911 + (y+1)*2654435761 + math.floor(t*10))
+      local ch = pick(blocks, n)
+      local c1 = ((n % 7) == 0) and rgba(255,120,140) or rgba(120,255,220)
+      draw.glyph(x, y, c1, ch, 2) -- request italic: should still render regular for these glyphs
     end
   end
 
-  -- HUD frame + labels
-  local pad = 1
-  local frame_col = ((math.sin(t*2.0)*0.5 + 0.5) > 0.5) and cyan or mag
-  frame(pad,pad, cols-1-pad, rows-1-pad, frame_col, 0)
+  -- Status bar
+  local mode = "NORMAL"
+  local pos  = string.format("Ln %d, Col %d", cursor_line, cursor_col)
+  local diag = string.format("%dW %dE", (scroll % 7), (scroll % 3))
+  draw_text(2, rows-status_h, accent, "no-vim", 1)
+  draw_text(10, rows-status_h, dim, mode, 0)
+  draw_text(cols-#pos-2, rows-status_h, text, pos, 0)
+  draw_text(cols-#pos-#diag-6, rows-status_h, warn, diag, 0)
 
-  putstr(3, 1, cyan, "QTERM // CYBER STRESS (LuaJIT)", 0)
-
-  -- crosshair
-  local cx = math.floor((math.sin(t*0.9)*0.5 + 0.5) * (cols-1))
-  local cy = math.floor((math.sin(t*1.1+2.1)*0.5 + 0.5) * (rows-1))
-  local cross = ((math.sin(t*3.3)*0.5 + 0.5) > 0.5) and cyan or mag
-
-  for dx = -8, 8 do
-    local x = cx + dx
-    if x >= 1 and x < cols-1 and cy >= 1 and cy < rows-1 and dx ~= 0 then
-      draw.glyph(x, cy, cross, "─", 0)
-    end
-  end
-  for dy = -4, 4 do
-    local y = cy + dy
-    if y >= 1 and y < rows-1 and cx >= 1 and cx < cols-1 and dy ~= 0 then
-      draw.glyph(cx, y, cross, "│", 0)
-    end
-  end
-  if cx >= 1 and cx < cols-1 and cy >= 1 and cy < rows-1 then
-    draw.glyph(cx, cy, white, "┼", 0)
-  end
-
-  -- burst blocks (█)
-  local burst = (math.sin(t*4.0) * 0.5 + 0.5)
-  if burst > 0.92 then
-    local bx = math.floor((math.sin(t*2.3+0.7)*0.5 + 0.5) * (cols-6)) + 3
-    local by = math.floor((math.sin(t*2.9+1.2)*0.5 + 0.5) * (rows-6)) + 3
-    for yy = -2, 2 do
-      for xx = -5, 5 do
-        local x = bx + xx
-        local y = by + yy
-        if x >= 1 and x < cols-1 and y >= 1 and y < rows-1 then
-          local u = 1.0 - (math.abs(xx)/5.0)
-          local c = rgba(
-            math.floor(lerp(80, 255, u*0.8) + 0.5),
-            80,
-            math.floor(lerp(220, 255, u*0.6) + 0.5),
-            255
-          )
-          draw.glyph(x, y, c, "█", 0)
-        end
-      end
-    end
-  end
+  -- Neon corner brackets
+  box(0, top_h, tree_w, content_h, rgba(60, 80, 110))
+  box(doc_x0, top_h, doc_w, content_h, rgba(60, 80, 110))
 end
-
--- tiny helper used above (kept global to avoid forward decl noise)
-function lerp(a,b,u) return a + (b-a)*u end
 
