@@ -1,7 +1,7 @@
 package main
 
 // -----------------------------------------------------------------------------
-// tuicore / Qterm prototype
+// tuicore prototype
 //
 // Purpose:
 // - Minimal monospace grid renderer driven by Lua callbacks.
@@ -38,7 +38,7 @@ import c        "core:c"
 // -----------------------------------------------------------------------------
 
 // User-facing font size (UI points, typical editor UX).
-Font_Pt: c.int = 16
+Font_Pt: c.int = 8
 
 // Internal raster size passed to LoadFontEx (computed at startup).
 Font_Px: c.int
@@ -90,20 +90,7 @@ REGULAR_CODEPOINTS: [9]Codepoint_Range = {
 	{rune(0xE0B0), rune(0xE0B3)},
 }
 
-// codepoint_in_ranges returns true if cp is inside any inclusive range.
-codepoint_in_ranges :: proc "contextless" (cp: rune, ranges: []Codepoint_Range) -> bool {
-	for r in ranges {
-		if cp >= r.first && cp <= r.last {
-			return true
-		}
-	}
-	return false
-}
 
-// is_base_codepoint returns true if cp is allowed to render with faces 1..3.
-is_base_codepoint :: proc "contextless" (cp: rune) -> bool {
-	return codepoint_in_ranges(cp, BASE_CODEPOINTS[:])
-}
 
 // count_ranges counts total codepoints across inclusive ranges.
 count_ranges :: proc "contextless" (ranges: []Codepoint_Range) -> int {
@@ -116,14 +103,14 @@ count_ranges :: proc "contextless" (ranges: []Codepoint_Range) -> int {
 
 // write_ranges expands inclusive ranges into out[] and returns count written.
 write_ranges :: proc "contextless" (out: []rune, ranges: []Codepoint_Range) -> int {
-	w := 0
+	written := 0
 	for r in ranges {
 		for cp := r.first; cp <= r.last; cp += 1 {
-			out[w] = cp
-			w += 1
+			out[written] = cp
+			written += 1
 		}
 	}
-	return w
+	return written
 }
 
 
@@ -132,26 +119,45 @@ write_ranges :: proc "contextless" (out: []rune, ranges: []Codepoint_Range) -> i
 // -----------------------------------------------------------------------------
 
 // read_rgba_table reads Lua table {r,g,b,a} (1-based) into rl.Color.
-// Minimal: no validation, no defaults.
+// Contract: requires a table with 4 numeric entries; no clamping.
 read_rgba_table :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> rl.Color {
+	lua.L_checktype(L, cast(c.int)(idx), lua.Type.TABLE)
+
 	lua.rawgeti(L, idx, cast(lua.Integer)(1))
-	r := cast(u8)(lua.tointeger(L, -1))
+	if lua.type(L, -1) != lua.Type.NUMBER {
+		lua.L_error(L, cstring("rgba[1] must be a number"))
+		return rl.Color{}
+	}
+	r := cast(u8)(cast(f64)(lua.tonumber(L, -1)))
 	lua.pop(L, 1)
 
 	lua.rawgeti(L, idx, cast(lua.Integer)(2))
-	g := cast(u8)(lua.tointeger(L, -1))
+	if lua.type(L, -1) != lua.Type.NUMBER {
+		lua.L_error(L, cstring("rgba[2] must be a number"))
+		return rl.Color{}
+	}
+	g := cast(u8)(cast(f64)(lua.tonumber(L, -1)))
 	lua.pop(L, 1)
 
 	lua.rawgeti(L, idx, cast(lua.Integer)(3))
-	b := cast(u8)(lua.tointeger(L, -1))
+	if lua.type(L, -1) != lua.Type.NUMBER {
+		lua.L_error(L, cstring("rgba[3] must be a number"))
+		return rl.Color{}
+	}
+	b := cast(u8)(cast(f64)(lua.tonumber(L, -1)))
 	lua.pop(L, 1)
 
 	lua.rawgeti(L, idx, cast(lua.Integer)(4))
-	a := cast(u8)(lua.tointeger(L, -1))
+	if lua.type(L, -1) != lua.Type.NUMBER {
+		lua.L_error(L, cstring("rgba[4] must be a number"))
+		return rl.Color{}
+	}
+	a := cast(u8)(cast(f64)(lua.tonumber(L, -1)))
 	lua.pop(L, 1)
 
 	return rl.Color{r, g, b, a}
 }
+
 
 
 // -----------------------------------------------------------------------------
@@ -160,13 +166,14 @@ read_rgba_table :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> rl.Colo
 
 // update_lua_globals updates Lua globals that depend on render size.
 update_lua_globals :: proc(L: ^lua.State) {
-	w := cast(i32)(rl.GetRenderWidth())
-	h := cast(i32)(rl.GetRenderHeight())
+	render_w := cast(i32)(rl.GetRenderWidth())
+	render_h := cast(i32)(rl.GetRenderHeight())
 
-	lua.pushinteger(L, cast(lua.Integer)(w / Cell_W))
+	// Invariant: Cell_W/Cell_H are > 0 by construction (set during init).
+	lua.pushinteger(L, cast(lua.Integer)(render_w / Cell_W))
 	lua.setglobal(L, cstring("TERM_COLS"))
 
-	lua.pushinteger(L, cast(lua.Integer)(h / Cell_H))
+	lua.pushinteger(L, cast(lua.Integer)(render_h / Cell_H))
 	lua.setglobal(L, cstring("TERM_ROWS"))
 }
 
@@ -201,8 +208,8 @@ lua_draw_clear :: proc "c" (L: ^lua.State) -> c.int {
 lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 	when PERF_TEST_ENABLED { Perf_Cell_Calls += 1 }
 
-	x := cast(i32)(lua.tointeger(L, 1))
-	y := cast(i32)(lua.tointeger(L, 2))
+	x := cast(i32)(lua.L_checkinteger(L, 1))
+	y := cast(i32)(lua.L_checkinteger(L, 2))
 	col := read_rgba_table(L, 3)
 
 	rl.DrawRectangle(x * Cell_W, y * Cell_H, Cell_W, Cell_H, col)
@@ -215,24 +222,33 @@ lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 lua_draw_glyph :: proc "c" (L: ^lua.State) -> c.int {
 	when PERF_TEST_ENABLED { Perf_Glyph_Calls += 1 }
 
-	x := cast(i32)(lua.tointeger(L, 1))
-	y := cast(i32)(lua.tointeger(L, 2))
+	x := cast(i32)(lua.L_checkinteger(L, 1))
+	y := cast(i32)(lua.L_checkinteger(L, 2))
 	col := read_rgba_table(L, 3)
 
 	text := lua.L_checkstring(L, 4)
-	face := cast(i32)(lua.tointeger(L, 5))
+	face := cast(i32)(lua.L_checkinteger(L, 5))
 
 	cp_size: c.int = 0
 	cp := rl.GetCodepoint(text, &cp_size)
 
-	// Only BASE_CODEPOINTS may use non-regular faces.
-	if !is_base_codepoint(cp) {
-		face = 0
+	// Guard: face must be in [0..3] (error on misuse).
+	if face < 0 || face > 3 {
+		lua.L_error(L, cstring("draw.glyph: face out of range (expected 0..3, got %d)"), face)
+		return 0
 	}
 
-	// Clamp face to [0..3] (minimal sanity).
-	if face < 0 { face = 0 }
-	if face > 3 { face = 3 }
+	// Policy: only BASE_CODEPOINTS may use non-regular faces (coverage fallback to face 0).
+	base_ok := false
+	for r in BASE_CODEPOINTS {
+		if cp >= r.first && cp <= r.last {
+			base_ok = true
+			break
+		}
+	}
+	if !base_ok {
+		face = 0
+	}
 
 	// █ => filled cell (perfect, avoids raster seams).
 	if cp == rune(0x2588) {
@@ -338,7 +354,6 @@ call_lua_number :: proc(L: ^lua.State, name: cstring, x: f64) -> bool {
 	return ok
 }
 
-call_lua :: proc{call_lua_noargs, call_lua_number}
 
 
 // -----------------------------------------------------------------------------
@@ -348,7 +363,7 @@ call_lua :: proc{call_lua_noargs, call_lua_number}
 main :: proc() {
 	// Window.
 	rl.SetConfigFlags(rl.ConfigFlags{.WINDOW_RESIZABLE})
-	rl.InitWindow(800, 450, cstring("Qterm"))
+	rl.InitWindow(800, 450, cstring("tuicore"))
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(60)
 
@@ -372,12 +387,12 @@ main :: proc() {
 	_ = write_ranges(base_codepoints, BASE_CODEPOINTS[:])
 
 	regular_codepoints := make([]rune, base_count + reg_count)
-	w := 0
-	w += write_ranges(regular_codepoints[w:], BASE_CODEPOINTS[:])
-	w += write_ranges(regular_codepoints[w:], REGULAR_CODEPOINTS[:])
+	regular_written := 0
+	regular_written += write_ranges(regular_codepoints[regular_written:], BASE_CODEPOINTS[:])
+	regular_written += write_ranges(regular_codepoints[regular_written:], REGULAR_CODEPOINTS[:])
 
-	// Load fonts.
-	Active_Font[0] = rl.LoadFontEx(Font_Path[0], Font_Px, &regular_codepoints[0], cast(c.int)(w))
+	// Load fonts
+	Active_Font[0] = rl.LoadFontEx(Font_Path[0], Font_Px, &regular_codepoints[0], cast(c.int)(regular_written))
 	rl.SetTextureFilter(Active_Font[0].texture, rl.TextureFilter.POINT)
 	rl.SetTextureWrap(Active_Font[0].texture, rl.TextureWrap.CLAMP)
 
@@ -416,14 +431,14 @@ main :: proc() {
 	engine_dir := filepath.dir(os.args[0])
 	main_path, jerr := filepath.join([]string{engine_dir, "main.lua"})
 	if jerr != .None {
-		fmt.printf("Qterm: filepath.join failed: %v\n", jerr)
+		fmt.printf("tuicore: filepath.join failed: %v\n", jerr)
 		return
 	}
 	defer delete(main_path)
 
 	main_cstr, cerr := strings.clone_to_cstring(main_path)
 	if cerr != .None {
-		fmt.printf("Qterm: clone_to_cstring failed: %v\n", cerr)
+		fmt.printf("tuicore: clone_to_cstring failed: %v\n", cerr)
 		return
 	}
 	defer delete(main_cstr)
@@ -438,10 +453,9 @@ main :: proc() {
 	lua.settop(L, 0)
 
 	// Lua init.
-	if !call_lua(L, cstring("init_terminal")) { return }
+	if !call_lua_noargs(L, cstring("init_terminal")) { return }
 
 	// Main loop.
-	last_time := rl.GetTime()
 	for !rl.WindowShouldClose() {
 		frame_t0 := rl.GetTime()
 
@@ -449,13 +463,11 @@ main :: proc() {
 			update_lua_globals(L)
 		}
 
-		now := rl.GetTime()
-		dt := now - last_time
-		last_time = now
+		dt := cast(f64)(rl.GetFrameTime()) // raylib last-frame delta (seconds)
 
 		// Time Lua update.
 		u0 := rl.GetTime()
-		ok_upd := call_lua(L, cstring("update_terminal"), dt)
+		ok_upd := call_lua_number(L, cstring("update_terminal"), dt)
 		u1 := rl.GetTime()
 		update_dt := u1 - u0
 		if !ok_upd { break }
@@ -463,7 +475,7 @@ main :: proc() {
 		// Time Lua draw (CPU time spent in draw_terminal + draw.* callbacks).
 		rl.BeginDrawing()
 		d0 := rl.GetTime()
-		ok_draw := call_lua(L, cstring("draw_terminal"))
+		ok_draw := call_lua_noargs(L, cstring("draw_terminal"))
 		d1 := rl.GetTime()
 		rl.EndDrawing()
 		draw_dt := d1 - d0
