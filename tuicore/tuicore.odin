@@ -1,361 +1,327 @@
 package main
 
-// Phase 3A (clean):
-// - SDL_ttf init + load 4 faces (regular/bold/italic/bold-italic)
-// - Derive cell metrics from the regular face (no glyph drawing yet)
-// - Resize updates TERM_COLS/TERM_ROWS via window events (no per-frame polling)
+// -----------------------------------------------------------------------------
+// Qterm / tuicore prototype
 //
-// Lua API remains:
-// - draw.clear({r,g,b,a})
-// - draw.cell(col,row,{r,g,b,a})
-// - globals: TERM_COLS / TERM_ROWS
+// Purpose:
+// - Minimal monospace grid renderer driven by Lua callbacks.
+// - User font size is UI points (like normal editors), converted to pixel-ish size.
+// - Box/line glyph overflow is handled by cropping the glyph quad to the cell.
+//
+// Lua contract:
+// - Must define: init_terminal(), update_terminal(dt), draw_terminal()
+// - Exposes: draw.clear(rgba), draw.cell(x,y,rgba), draw.glyph(x,y,rgba,text,face)
+// - Exposes globals: TERM_COLS, TERM_ROWS
+//
+// Notes:
+// - draw.glyph draws ONLY the first UTF-8 codepoint from `text` (one cell).
+// - Baked codepoint set is prototype-only (ASCII + a few box/block glyphs).
+// -----------------------------------------------------------------------------
 
+import rl       "vendor:raylib"
 import lua      "luajit"
 import os       "core:os"
-import fmt      "core:fmt"
 import strings  "core:strings"
 import filepath "core:path/filepath"
 import c        "core:c"
-import sdl      "vendor:sdl2"
-import ttf      "vendor:sdl2/ttf"
 
 
-// Globals (not const; later you can override from Lua before font load)
-Font_Paths: [4]string = [4]string{
-	"C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Regular.ttf",
-	"C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Bold.ttf",
-	"C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Italic.ttf",
-	"C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-BoldItalic.ttf",
+// -----------------------------------------------------------------------------
+// Global config/state
+// -----------------------------------------------------------------------------
+
+// User-facing font size (UI points, typical editor UX).
+Font_Pt: c.int = 15
+
+// Internal raster size passed to LoadFontEx (computed at startup).
+Font_Px: c.int
+
+// Face order: 0=Regular, 1=Bold, 2=Italic, 3=BoldItalic
+Font_Path: [4]cstring = {
+	cstring("C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Regular.ttf"),
+	cstring("C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Bold.ttf"),
+	cstring("C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Italic.ttf"),
+	cstring("C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-BoldItalic.ttf"),
 }
 
-// 0=regular, 1=bold, 2=italic, 3=bold-italic
-Active_Font: [4]^ttf.Font = {}
+Active_Font: [4]rl.Font
 
-Font_Size: c.int = 8
-
-
-Cell_Canvas_State: struct {
-	cell_w, cell_h: i32,
-	win_w, win_h: i32,
-	cols, rows: i32,
-	canvas_w, canvas_h: i32,
-} = {}
-
-// Renderer target for Lua draw calls (single renderer, single window).
-G_Renderer: ^sdl.Renderer = nil
+// Cell metrics in pixels.
+Cell_W: i32
+Cell_H: i32
 
 
-recompute_cell_canvas :: proc(win_w, win_h: i32) {
-	Cell_Canvas_State.win_w = win_w
-	Cell_Canvas_State.win_h = win_h
+// -----------------------------------------------------------------------------
+// Lua data helpers
+// -----------------------------------------------------------------------------
 
-	Cell_Canvas_State.cols = win_w / Cell_Canvas_State.cell_w
-	Cell_Canvas_State.rows = win_h / Cell_Canvas_State.cell_h
+// read_rgba_table reads Lua table {r,g,b,a} (1-based) into rl.Color.
+// Minimal: no validation, no defaults.
+read_rgba_table :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> rl.Color {
+	lua.rawgeti(L, idx, cast(lua.Integer)(1))
+	r := cast(u8)(lua.tointeger(L, -1))
+	lua.pop(L, 1)
 
-	Cell_Canvas_State.canvas_w = Cell_Canvas_State.cols * Cell_Canvas_State.cell_w
-	Cell_Canvas_State.canvas_h = Cell_Canvas_State.rows * Cell_Canvas_State.cell_h
+	lua.rawgeti(L, idx, cast(lua.Integer)(2))
+	g := cast(u8)(lua.tointeger(L, -1))
+	lua.pop(L, 1)
+
+	lua.rawgeti(L, idx, cast(lua.Integer)(3))
+	b := cast(u8)(lua.tointeger(L, -1))
+	lua.pop(L, 1)
+
+	lua.rawgeti(L, idx, cast(lua.Integer)(4))
+	a := cast(u8)(lua.tointeger(L, -1))
+	lua.pop(L, 1)
+
+	return rl.Color{r, g, b, a}
 }
 
-sync_term_globals :: proc(L: ^lua.State) {
-	lua.pushinteger(L, cast(lua.Integer)(Cell_Canvas_State.cols))
+
+// -----------------------------------------------------------------------------
+// Lua globals + API binding
+// -----------------------------------------------------------------------------
+
+// update_lua_globals updates Lua globals that depend on window/render size.
+// Uses render size (HiDPI aware) and current Cell_W/Cell_H.
+update_lua_globals :: proc(L: ^lua.State) {
+	w := cast(i32)(rl.GetRenderWidth())
+	h := cast(i32)(rl.GetRenderHeight())
+
+	lua.pushinteger(L, cast(lua.Integer)(w / Cell_W))
 	lua.setglobal(L, cstring("TERM_COLS"))
 
-	lua.pushinteger(L, cast(lua.Integer)(Cell_Canvas_State.rows))
+	lua.pushinteger(L, cast(lua.Integer)(h / Cell_H))
 	lua.setglobal(L, cstring("TERM_ROWS"))
 }
 
-get_time_seconds :: proc() -> f64 {
-	return f64(sdl.GetPerformanceCounter()) / f64(sdl.GetPerformanceFrequency())
+// bind_lua_api registers everything this program exposes to Lua.
+// Call AFTER Cell_W/Cell_H are computed.
+bind_lua_api :: proc(L: ^lua.State) {
+	// draw table
+	lua.newtable(L)
+	lua.pushcfunction(L, lua_draw_clear); lua.setfield(L, -2, cstring("clear"))
+	lua.pushcfunction(L, lua_draw_cell);  lua.setfield(L, -2, cstring("cell"))
+	lua.pushcfunction(L, lua_draw_glyph); lua.setfield(L, -2, cstring("glyph"))
+	lua.setglobal(L, cstring("draw"))
+
+	// globals (TERM_COLS/TERM_ROWS)
+	update_lua_globals(L)
 }
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Pure helper (contextless): read {r,g,b,a} as raw bytes
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Lua draw API (global table `draw`)
+// -----------------------------------------------------------------------------
 
-read_rgba_table :: proc "contextless" (L: ^lua.State, idx: c.int) -> (u8, u8, u8, u8) {
-	r: u8 = 0
-	g: u8 = 0
-	b: u8 = 0
-	a: u8 = 255
-
-	lua.rawgeti(L, cast(lua.Index)(idx), cast(lua.Integer)(1))
-	r = cast(u8)(lua.tointeger(L, -1))
-	lua.pop(L, 1)
-
-	lua.rawgeti(L, cast(lua.Index)(idx), cast(lua.Integer)(2))
-	g = cast(u8)(lua.tointeger(L, -1))
-	lua.pop(L, 1)
-
-	lua.rawgeti(L, cast(lua.Index)(idx), cast(lua.Integer)(3))
-	b = cast(u8)(lua.tointeger(L, -1))
-	lua.pop(L, 1)
-
-	lua.rawgeti(L, cast(lua.Index)(idx), cast(lua.Integer)(4))
-	if lua.isnumber(L, -1) {
-		a = cast(u8)(lua.tointeger(L, -1))
-	}
-	lua.pop(L, 1)
-
-	return r, g, b, a
-}
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Lua-exposed draw API (proc "c")
-// ─────────────────────────────────────────────────────────────────────────────
-
+// draw.clear({r,g,b,a})
 lua_draw_clear :: proc "c" (L: ^lua.State) -> c.int {
-	r: u8 = 0
-	g: u8 = 0
-	b: u8 = 0
-	a: u8 = 255
-
-	if cast(c.int)(lua.gettop(L)) >= 1 {
-		lua.L_checktype(L, 1, .TABLE)
-		r, g, b, a = read_rgba_table(L, 1)
-	}
-
-	if G_Renderer != nil {
-		sdl.SetRenderDrawColor(G_Renderer, r, g, b, a)
-		sdl.RenderClear(G_Renderer)
-	}
-
+	col := read_rgba_table(L, 1)
+	rl.ClearBackground(col)
 	return 0
 }
 
+// draw.cell(x, y, {r,g,b,a})
+// Fills a cell rectangle (cell coords, not pixels).
 lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
-	col := cast(i32)(lua.L_checkinteger(L, 1))
-	row := cast(i32)(lua.L_checkinteger(L, 2))
-	lua.L_checktype(L, 3, .TABLE)
+	x := cast(i32)(lua.tointeger(L, 1))
+	y := cast(i32)(lua.tointeger(L, 2))
+	col := read_rgba_table(L, 3)
 
-	r, g, b, a := read_rgba_table(L, 3)
+	rl.DrawRectangle(x * Cell_W, y * Cell_H, Cell_W, Cell_H, col)
+	return 0
+}
 
-	if G_Renderer == nil {
+
+// draw.glyph(x, y, {r,g,b,a}, text, face)
+// Draws ONE cell: uses first UTF-8 codepoint from `text`.
+// Special-case: █ is rendered as a filled cell (no font gaps).
+lua_draw_glyph :: proc "c" (L: ^lua.State) -> c.int {
+	x := cast(i32)(lua.tointeger(L, 1))
+	y := cast(i32)(lua.tointeger(L, 2))
+	col := read_rgba_table(L, 3)
+
+	text := lua.L_checkstring(L, 4)
+	face := cast(i32)(lua.tointeger(L, 5))
+
+	cp_size: c.int = 0
+	cp := rl.GetCodepoint(text, &cp_size)
+
+	cell_px_x := x * Cell_W
+	cell_px_y := y * Cell_H
+
+	// █ => filled cell (perfect, avoids raster seams)
+	if cp == rune(0x2588) {
+		rl.DrawRectangle(cell_px_x, cell_px_y, Cell_W, Cell_H, col)
 		return 0
 	}
 
-	px := col * Cell_Canvas_State.cell_w
-	py := row * Cell_Canvas_State.cell_h
+	gi := rl.GetGlyphInfo(Active_Font[face], cp)
+	src := rl.GetGlyphAtlasRec(Active_Font[face], cp)
 
-	rect := sdl.Rect{
-		x = cast(c.int)(px),
-		y = cast(c.int)(py),
-		w = cast(c.int)(Cell_Canvas_State.cell_w),
-		h = cast(c.int)(Cell_Canvas_State.cell_h),
+	// Natural glyph destination rect for this cell.
+	dst := rl.Rectangle{
+		x      = cast(f32)(cell_px_x) + cast(f32)(gi.offsetX),
+		y      = cast(f32)(cell_px_y) + cast(f32)(gi.offsetY),
+		width  = src.width,
+		height = src.height,
 	}
 
-	sdl.SetRenderDrawColor(G_Renderer, r, g, b, a)
-	sdl.RenderFillRect(G_Renderer, &rect)
+	// Cell clip rect.
+	clip := rl.Rectangle{
+		x      = cast(f32)(cell_px_x),
+		y      = cast(f32)(cell_px_y),
+		width  = cast(f32)(Cell_W),
+		height = cast(f32)(Cell_H),
+	}
 
+	// Intersection of glyph dst with cell clip.
+	inter := rl.GetCollisionRec(dst, clip)
+	if inter.width <= 0.0 || inter.height <= 0.0 {
+		return 0
+	}
+
+	// Trim source by the same amount trimmed from destination (1:1 scale).
+	src.x += (inter.x - dst.x)
+	src.y += (inter.y - dst.y)
+	src.width  = inter.width
+	src.height = inter.height
+
+	dst = inter
+
+	rl.DrawTexturePro(Active_Font[face].texture, src, dst, rl.Vector2{0, 0}, 0.0, col)
 	return 0
 }
 
-bind_draw_api :: proc(L: ^lua.State) {
-	lua.newtable(L)
 
-	lua.pushcfunction(L, lua_draw_clear)
-	lua.setfield(L, -2, cstring("clear"))
+// -----------------------------------------------------------------------------
+// Lua call helpers (proc-group)
+// -----------------------------------------------------------------------------
 
-	lua.pushcfunction(L, lua_draw_cell)
-	lua.setfield(L, -2, cstring("cell"))
-
-	lua.setglobal(L, cstring("draw"))
-}
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Existing Lua callback helpers (keep minimal)
-// ─────────────────────────────────────────────────────────────────────────────
-
+// call_lua_noargs calls global Lua function name() -> no returns.
 call_lua_noargs :: proc(L: ^lua.State, name: cstring) -> bool {
 	lua.getglobal(L, name)
-	if !lua.isfunction(L, -1) {
-		fmt.printf("Qterm: missing global function %s\n", string(name))
-		lua.settop(L, 0)
-		return false
-	}
-
-	if lua.pcall(L, 0, 0, 0) != lua.Status.OK {
-		fmt.printf("Qterm: error in %s: %s\n", string(name), string(lua.tostring(L, -1)))
-		lua.settop(L, 0)
-		return false
-	}
-
+	ok := lua.pcall(L, 0, 0, 0) == lua.Status.OK
 	lua.settop(L, 0)
-	return true
+	return ok
 }
 
-call_lua_number :: proc(L: ^lua.State, name: cstring, arg: lua.Number) -> bool {
+// call_lua_number calls global Lua function name(x) -> no returns.
+call_lua_number :: proc(L: ^lua.State, name: cstring, x: f64) -> bool {
 	lua.getglobal(L, name)
-	if !lua.isfunction(L, -1) {
-		fmt.printf("Qterm: missing global function %s\n", string(name))
-		lua.settop(L, 0)
-		return false
-	}
-
-	lua.pushnumber(L, arg)
-
-	if lua.pcall(L, 1, 0, 0) != lua.Status.OK {
-		fmt.printf("Qterm: error in %s: %s\n", string(name), string(lua.tostring(L, -1)))
-		lua.settop(L, 0)
-		return false
-	}
-
+	lua.pushnumber(L, cast(lua.Number)(x))
+	ok := lua.pcall(L, 1, 0, 0) == lua.Status.OK
 	lua.settop(L, 0)
-	return true
+	return ok
 }
 
 call_lua :: proc{call_lua_noargs, call_lua_number}
 
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // main
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 main :: proc() {
-	engine_dir := filepath.dir(os.args[0])
+	// Window
+	rl.SetConfigFlags(rl.ConfigFlags{.WINDOW_RESIZABLE})
+	rl.InitWindow(800, 450, cstring("Qterm"))
+	defer rl.CloseWindow()
+	rl.SetTargetFPS(60)
 
-	main_path, jerr := filepath.join([]string{engine_dir, "main.lua"})
-	if jerr != .None {
-		fmt.printf("Qterm: filepath.join failed: %v\n", jerr)
-		return
+	// UI points -> pixels (logical DPI model)
+	// baseline: 96 dpi, 1pt = 1/72 inch => px = pt * 96/72 = pt * 4/3
+	s := rl.GetWindowScaleDPI()
+	scale := s[0]
+	if scale <= 0.0 { scale = 1.0 }
+
+	px_f := cast(f32)(Font_Pt) * (4.0 / 3.0) * scale
+	Font_Px = cast(c.int)(px_f + 0.5)
+	if Font_Px < 1 { Font_Px = 1 }
+
+	// Prototype bake set: ASCII + a few box/block glyphs used in demos.
+	codepoints: [256]rune
+	n: c.int = 0
+	for cp := rune(32); cp <= rune(126); cp += 1 {
+		codepoints[cast(int)(n)] = cp
+		n += 1
 	}
+	codepoints[cast(int)(n)] = rune(0x2500); n += 1 // ─
+	codepoints[cast(int)(n)] = rune(0x2502); n += 1 // │
+	codepoints[cast(int)(n)] = rune(0x250C); n += 1 // ┌
+	codepoints[cast(int)(n)] = rune(0x2510); n += 1 // ┐
+	codepoints[cast(int)(n)] = rune(0x2514); n += 1 // └
+	codepoints[cast(int)(n)] = rune(0x2518); n += 1 // ┘
+	codepoints[cast(int)(n)] = rune(0x253C); n += 1 // ┼
+	codepoints[cast(int)(n)] = rune(0x2588); n += 1 // █
+
+	// Load fonts
+	for i in 0..<4 {
+		Active_Font[i] = rl.LoadFontEx(Font_Path[i], Font_Px, &codepoints[0], n)
+		rl.SetTextureFilter(Active_Font[i].texture, rl.TextureFilter.POINT)
+		rl.SetTextureWrap(Active_Font[i].texture, rl.TextureWrap.CLAMP)
+	}
+	defer {
+		for i in 0..<4 {
+			rl.UnloadFont(Active_Font[i])
+		}
+	}
+
+	// Cell metrics: width from monospace advance (so box drawing joins).
+	max_adv: c.int = 1
+	for i: c.int = 0; i < n; i += 1 {
+		cp := codepoints[cast(int)(i)]
+		adv := rl.GetGlyphInfo(Active_Font[0], cp).advanceX
+		if adv > max_adv { max_adv = adv }
+	}
+	Cell_W = cast(i32)(max_adv)
+
+	Cell_H = cast(i32)(Active_Font[0].baseSize)
+	if Cell_H <= 0 { Cell_H = 1 }
+
+	// Lua state
+	L := lua.L_newstate()
+	defer lua.close(L)
+	lua.L_openlibs(L)
+
+	// Bind Lua surface (tables + globals)
+	bind_lua_api(L)
+
+	// Load main.lua next to the executable.
+	engine_dir := filepath.dir(os.args[0])
+	main_path, jerr := filepath.join([]string{engine_dir, "main.lua"})
+	if jerr != .None { return }
 	defer delete(main_path)
 
 	main_cstr, cerr := strings.clone_to_cstring(main_path)
-	if cerr != .None {
-		fmt.printf("Qterm: clone_to_cstring failed: %v\n", cerr)
-		return
-	}
+	if cerr != .None { return }
 	defer delete(main_cstr)
 
-	assert(sdl.Init(sdl.INIT_VIDEO) == 0, sdl.GetErrorString())
-	defer sdl.Quit()
+	if lua.L_dofile(L, main_cstr) != lua.Status.OK { return }
+	lua.settop(L, 0)
 
-	// Phase 3A: SDL_ttf + 4 faces + real cell metrics.
-	assert(ttf.Init() == 0, string(ttf.GetError()))
-	defer ttf.Quit()
+	// Lua init
+	if !call_lua(L, cstring("init_terminal")) { return }
 
-	defer {
-		for i in 0..<4 {
-			if Active_Font[i] != nil {
-				ttf.CloseFont(Active_Font[i])
-				Active_Font[i] = nil
-			}
-		}
-	}
-
-	for i in 0..<4 {
-		p, perr := strings.clone_to_cstring(Font_Paths[i])
-		if perr != .None {
-			fmt.printf("Qterm: clone_to_cstring font path failed: %v\n", perr)
-			return
-		}
-		Active_Font[i] = ttf.OpenFont(p, Font_Size)
-		delete(p)
-		assert(Active_Font[i] != nil, string(ttf.GetError()))
-	}
-
-	// Derive cell metrics from regular face (index 0).
-	{
-		Cell_Canvas_State.cell_h = cast(i32)(ttf.FontLineSkip(Active_Font[0]))
-		assert(Cell_Canvas_State.cell_h > 0, "TTF FontLineSkip <= 0")
-
-		minx, maxx, miny, maxy, advance: c.int
-		assert(ttf.GlyphMetrics32(Active_Font[0], 'M', &minx, &maxx, &miny, &maxy, &advance) == 0, string(ttf.GetError()))
-		Cell_Canvas_State.cell_w = cast(i32)(advance)
-		assert(Cell_Canvas_State.cell_w > 0, "TTF GlyphMetrics advance <= 0")
-	}
-
-	window := sdl.CreateWindow(
-		"Qterm",
-		sdl.WINDOWPOS_CENTERED, sdl.WINDOWPOS_CENTERED,
-		800, 450,
-		sdl.WindowFlags{.SHOWN, .RESIZABLE},
-	)
-	assert(window != nil, sdl.GetErrorString())
-	defer sdl.DestroyWindow(window)
-
-	renderer := sdl.CreateRenderer(window, -1, sdl.RENDERER_ACCELERATED)
-	assert(renderer != nil, sdl.GetErrorString())
-	defer sdl.DestroyRenderer(renderer)
-
-	G_Renderer = renderer
-
-	L := (^lua.State)(lua.L_newstate())
-	if L == nil {
-		fmt.println("Qterm: failed to create Lua state")
-		return
-	}
-	defer lua.close(L)
-
-	lua.L_openlibs(L)
-
-	// Bind draw API before loading script.
-	bind_draw_api(L)
-
-	if lua.L_dofile(L, main_cstr) != lua.Status.OK {
-		fmt.printf("Qterm: error loading main.lua: %s\n", string(lua.tostring(L, -1)))
-		lua.settop(L, 0)
-		return
-	}
-
-	// Prime canvas + TERM_COLS/ROWS once.
-	{
-		w, h: i32
-		sdl.GetWindowSize(window, &w, &h)
-		recompute_cell_canvas(w, h)
-		sync_term_globals(L)
-	}
-
-	if !call_lua(L, cstring("init_terminal")) {
-		return
-	}
-
-	running   := true
-	last_time := get_time_seconds()
-
-	for running {
-		event: sdl.Event
-		for sdl.PollEvent(&event) {
-			if event.type == .QUIT {
-				running = false
-			} else if event.type == .WINDOWEVENT {
-				// No per-frame polling: recompute on any window event (cheap + correct).
-				w, h: i32
-				sdl.GetWindowSize(window, &w, &h)
-				recompute_cell_canvas(w, h)
-				sync_term_globals(L)
-			}
+	// Main loop
+	last_time := rl.GetTime()
+	for !rl.WindowShouldClose() {
+		if rl.IsWindowResized() {
+			update_lua_globals(L)
 		}
 
-		now := get_time_seconds()
-		dt  := now - last_time
+		now := rl.GetTime()
+		dt := now - last_time
 		last_time = now
 
-		if !call_lua(L, cstring("update_terminal"), cast(lua.Number)(dt)) {
-			break
-		}
+		if !call_lua(L, cstring("update_terminal"), dt) { break }
 
-		// Lua is responsible for clearing + drawing (IMGUI style).
+		rl.BeginDrawing()
 		if !call_lua(L, cstring("draw_terminal")) {
+			rl.EndDrawing()
 			break
 		}
-
-		// Optional: keep the Phase 1 canvas outline (helps sanity while resizing).
-		{
-			r := sdl.Rect{
-				x = 0,
-				y = 0,
-				w = cast(c.int)(Cell_Canvas_State.canvas_w),
-				h = cast(c.int)(Cell_Canvas_State.canvas_h),
-			}
-			sdl.SetRenderDrawColor(renderer, u8(0), u8(255), u8(0), u8(255))
-			sdl.RenderDrawRect(renderer, &r)
-		}
-
-		sdl.RenderPresent(renderer)
+		rl.EndDrawing()
 	}
 }
 
