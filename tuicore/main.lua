@@ -127,6 +127,11 @@ end
 -- ---------------------------------------------------------------------
 
 function init_terminal()
+  -- Lua owns window creation for this test.
+  -- opts is a flat array of init flags (Style A): { "resizable", "vsync_on", ... }
+  window.init(1280, 720, "tuicore", { "resizable", "vsync_on", })
+  window.set_fps_limit(60)
+
   t = 0
 end
 

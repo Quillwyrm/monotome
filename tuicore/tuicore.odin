@@ -1,28 +1,16 @@
 package main
 
-// -----------------------------------------------------------------------------
-// tuicore prototype
+// tuicore — prototype terminal grid renderer driven by Lua.
+// Lua must define: init_terminal(), update_terminal(dt), draw_terminal().
 //
-// Purpose:
-// - Minimal monospace grid renderer driven by Lua callbacks.
-// - Font size is UI points (like normal editors), converted to pixel-ish size.
-// - Glyph ink overflow is handled by cropping the glyph quad to the cell.
+// Exposes to Lua:
+// - draw.clear(rgba), draw.cell(x,y,rgba), draw.glyph(x,y,rgba,text,face)
+// - window.* (see api_window.odin)
+// - globals: TERM_COLS, TERM_ROWS
 //
-// Lua contract:
-// - Must define: init_terminal(), update_terminal(dt), draw_terminal()
-// - Exposes: draw.clear(rgba), draw.cell(x,y,rgba), draw.glyph(x,y,rgba,text,face)
-// - Exposes globals: TERM_COLS, TERM_ROWS
-//
-// Notes:
-// - draw.glyph draws ONLY the first UTF-8 codepoint from `text` (one cell).
-// - Bake policy:
-//     - Faces 1..3 bake BASE_CODEPOINTS.
-//     - Face 0 bakes BASE_CODEPOINTS + REGULAR_CODEPOINTS.
-// - Render policy:
-//     - If codepoint is NOT in BASE_CODEPOINTS, requested face is forced to 0.
-// - Lua errors: load/init/update/draw failures print a traceback and stop.
-// - Perf: handled in perftest.odin (optional).
-// -----------------------------------------------------------------------------
+// Rendering notes:
+// - draw.glyph uses only the first UTF-8 codepoint from `text`.
+// - Glyph quads are clipped to the cell rectangle.
 
 import rl       "vendor:raylib"
 import lua      "luajit"
@@ -91,7 +79,6 @@ REGULAR_CODEPOINTS: [9]Codepoint_Range = {
 }
 
 
-
 // count_ranges counts total codepoints across inclusive ranges.
 count_ranges :: proc "contextless" (ranges: []Codepoint_Range) -> int {
 	total := 0
@@ -119,7 +106,7 @@ write_ranges :: proc "contextless" (out: []rune, ranges: []Codepoint_Range) -> i
 // -----------------------------------------------------------------------------
 
 // read_rgba_table reads Lua table {r,g,b,a} (1-based) into rl.Color.
-// Contract: requires a table with 4 numeric entries; no clamping.
+// Requires a table with 4 numeric entries; no clamping.
 read_rgba_table :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> rl.Color {
 	lua.L_checktype(L, cast(c.int)(idx), lua.Type.TABLE)
 
@@ -159,7 +146,6 @@ read_rgba_table :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> rl.Colo
 }
 
 
-
 // -----------------------------------------------------------------------------
 // Lua globals + API binding
 // -----------------------------------------------------------------------------
@@ -177,16 +163,16 @@ update_lua_globals :: proc(L: ^lua.State) {
 	lua.setglobal(L, cstring("TERM_ROWS"))
 }
 
-// bind_lua_api registers everything this program exposes to Lua.
-// Call AFTER Cell_W/Cell_H are computed.
-bind_lua_api :: proc(L: ^lua.State) {
+// register_lua_api registers Lua tables/functions (no size-dependent globals).
+// Call update_lua_globals(L) after the window + Cell_W/Cell_H are ready.
+register_lua_api :: proc(L: ^lua.State) {
 	lua.newtable(L)
 	lua.pushcfunction(L, lua_draw_clear); lua.setfield(L, -2, cstring("clear"))
 	lua.pushcfunction(L, lua_draw_cell);  lua.setfield(L, -2, cstring("cell"))
 	lua.pushcfunction(L, lua_draw_glyph); lua.setfield(L, -2, cstring("glyph"))
 	lua.setglobal(L, cstring("draw"))
 
-	update_lua_globals(L)
+	register_window_api(L)
 }
 
 
@@ -216,8 +202,7 @@ lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
-// draw.glyph(x, y, {r,g,b,a}, text, face)
-// Draws ONE cell: uses first UTF-8 codepoint from `text`.
+// draw.glyph(x, y, {r,g,b,a}, text, face) draws one cell from the first UTF-8 codepoint.
 // Special-case: █ is rendered as a filled cell (no font gaps).
 lua_draw_glyph :: proc "c" (L: ^lua.State) -> c.int {
 	when PERF_TEST_ENABLED { Perf_Glyph_Calls += 1 }
@@ -303,11 +288,10 @@ lua_draw_glyph :: proc "c" (L: ^lua.State) -> c.int {
 
 
 // -----------------------------------------------------------------------------
-// Lua errors + call helpers (proc-group)
+// Lua errors + call helpers
 // -----------------------------------------------------------------------------
 
-// lua_traceback is used as the error handler for lua.pcall.
-// It converts an error into a traceback string.
+// lua_traceback is the error handler for lua.pcall; it converts an error into a traceback string.
 lua_traceback :: proc "c" (L: ^lua.State) -> c.int {
 	msg := lua.tostring(L, 1)
 	if msg == nil { msg = cstring("Lua error") }
@@ -319,7 +303,7 @@ lua_traceback :: proc "c" (L: ^lua.State) -> c.int {
 // On failure, prints a traceback and returns false.
 call_lua_noargs :: proc(L: ^lua.State, name: cstring) -> bool {
 	lua.pushcfunction(L, lua_traceback)
-	errfunc := lua.gettop(L) // lua.Index (stack slot)
+	errfunc := lua.gettop(L)
 
 	lua.getglobal(L, name)
 
@@ -353,50 +337,123 @@ call_lua_number :: proc(L: ^lua.State, name: cstring, x: f64) -> bool {
 }
 
 
+// -----------------------------------------------------------------------------
+// Font pipeline helpers
+// -----------------------------------------------------------------------------
+
+// compute_font_px converts UI points (Font_Pt) into a pixel size used by LoadFontEx.
+// Also writes Font_Px.
+compute_font_px :: proc() -> c.int {
+	dpi := rl.GetWindowScaleDPI()
+	scale := dpi[0]
+
+	px_f := cast(f32)(Font_Pt) * (4.0 / 3.0) * scale
+	px := cast(c.int)(px_f + 0.5)
+
+	Font_Px = px
+	return px
+}
+
+// build_codepoint_lists expands the baked range lists into rune arrays for LoadFontEx.
+// Face 0 gets BASE_CODEPOINTS + REGULAR_CODEPOINTS; faces 1..3 get BASE_CODEPOINTS.
+build_codepoint_lists :: proc() -> (base_codepoints: []rune, regular_codepoints: []rune, regular_written: int) {
+	base_count := count_ranges(BASE_CODEPOINTS[:])
+	reg_count  := count_ranges(REGULAR_CODEPOINTS[:])
+
+	base_codepoints = make([]rune, base_count)
+	_ = write_ranges(base_codepoints, BASE_CODEPOINTS[:])
+
+	regular_codepoints = make([]rune, base_count + reg_count)
+	regular_written = 0
+	regular_written += write_ranges(regular_codepoints[regular_written:], BASE_CODEPOINTS[:])
+	regular_written += write_ranges(regular_codepoints[regular_written:], REGULAR_CODEPOINTS[:])
+
+	return
+}
+
+// load_active_fonts loads the 4 font faces and applies POINT/CLAMP texture policy.
+load_active_fonts :: proc(font_px: c.int, base_codepoints: []rune, regular_codepoints: []rune, regular_written: int) {
+	Active_Font[0] = rl.LoadFontEx(
+		Font_Path[0],
+		font_px,
+		&regular_codepoints[0],
+		cast(c.int)(regular_written),
+	)
+	rl.SetTextureFilter(Active_Font[0].texture, rl.TextureFilter.POINT)
+	rl.SetTextureWrap(Active_Font[0].texture, rl.TextureWrap.CLAMP)
+
+	for i in 1..<4 {
+		Active_Font[i] = rl.LoadFontEx(
+			Font_Path[i],
+			font_px,
+			&base_codepoints[0],
+			cast(c.int)(len(base_codepoints)),
+		)
+		rl.SetTextureFilter(Active_Font[i].texture, rl.TextureFilter.POINT)
+		rl.SetTextureWrap(Active_Font[i].texture, rl.TextureWrap.CLAMP)
+	}
+}
+
+// compute_cell_metrics computes Cell_W/Cell_H from the active regular font.
+// Width uses max ASCII advance; height uses font baseSize.
+compute_cell_metrics :: proc() {
+	max_adv: c.int = 1
+	for cp := rune(32); cp <= rune(126); cp += 1 {
+		adv := rl.GetGlyphInfo(Active_Font[0], cp).advanceX
+		if adv > max_adv {
+			max_adv = adv
+		}
+	}
+
+	Cell_W = cast(i32)(max_adv)
+	Cell_H = cast(i32)(Active_Font[0].baseSize)
+	// Invariant: Cell_H > 0 by construction (font baseSize expected > 0).
+}
+
 
 // -----------------------------------------------------------------------------
 // main
 // -----------------------------------------------------------------------------
 
+// main boots Lua, runs init, loads fonts, publishes TERM_COLS/ROWS, and runs the update/draw loop.
 main :: proc() {
-	// Window.
-	rl.SetConfigFlags(rl.ConfigFlags{.WINDOW_RESIZABLE})
-	rl.InitWindow(800, 450, cstring("tuicore"))
-	defer rl.CloseWindow()
-	rl.SetTargetFPS(60)
+	// -------------------------------------------------------------------------
+	// Lua state + script load
+	// -------------------------------------------------------------------------
+	L := lua.L_newstate()
+	defer lua.close(L)
+	lua.L_openlibs(L)
 
-	// UI points -> pixels (logical DPI model).
-	// baseline: 96 dpi, 1pt = 1/72 inch => px = pt * 96/72 = pt * 4/3
-	s := rl.GetWindowScaleDPI()
-	scale := s[0]
+	register_lua_api(L)
 
-	px_f := cast(f32)(Font_Pt) * (4.0 / 3.0) * scale
-	Font_Px = cast(c.int)(px_f + 0.5)
-
-	// Build baked codepoint lists from baselines:
-	// - Face 0: BASE_CODEPOINTS + REGULAR_CODEPOINTS
-	// - Faces 1..3: BASE_CODEPOINTS only
-	base_count := count_ranges(BASE_CODEPOINTS[:])
-	reg_count  := count_ranges(REGULAR_CODEPOINTS[:])
-
-	base_codepoints := make([]rune, base_count)
-	_ = write_ranges(base_codepoints, BASE_CODEPOINTS[:])
-
-	regular_codepoints := make([]rune, base_count + reg_count)
-	regular_written := 0
-	regular_written += write_ranges(regular_codepoints[regular_written:], BASE_CODEPOINTS[:])
-	regular_written += write_ranges(regular_codepoints[regular_written:], REGULAR_CODEPOINTS[:])
-
-	// Load fonts
-	Active_Font[0] = rl.LoadFontEx(Font_Path[0], Font_Px, &regular_codepoints[0], cast(c.int)(regular_written))
-	rl.SetTextureFilter(Active_Font[0].texture, rl.TextureFilter.POINT)
-	rl.SetTextureWrap(Active_Font[0].texture, rl.TextureWrap.CLAMP)
-
-	for i in 1..<4 {
-		Active_Font[i] = rl.LoadFontEx(Font_Path[i], Font_Px, &base_codepoints[0], cast(c.int)(base_count))
-		rl.SetTextureFilter(Active_Font[i].texture, rl.TextureFilter.POINT)
-		rl.SetTextureWrap(Active_Font[i].texture, rl.TextureWrap.CLAMP)
+	exe_dir := filepath.dir(os.args[0])
+	main_path, err := filepath.join([]string{exe_dir, "main.lua"})
+	if err != nil {
+		fmt.printf("join error:\n%s\n", err)
+		return
 	}
+	main_path_c := strings.clone_to_cstring(main_path, context.temp_allocator)
+
+	if lua.L_dofile(L, main_path_c) != lua.Status.OK {
+		lua_err := lua.tostring(L, -1)
+		fmt.printf("Lua load error:\n%s\n", lua_err)
+		lua.settop(L, 0)
+		return
+	}
+	lua.settop(L, 0)
+
+	// Lua init must create the window (window.init).
+	if !call_lua_noargs(L, cstring("init_terminal")) {
+		return
+	}
+
+	// -------------------------------------------------------------------------
+	// Font + cell metrics (needs window)
+	// -------------------------------------------------------------------------
+	font_px := compute_font_px()
+
+	base_codepoints, regular_codepoints, regular_written := build_codepoint_lists()
+	load_active_fonts(font_px, base_codepoints, regular_codepoints, regular_written)
 
 	defer {
 		for i in 0..<4 {
@@ -404,82 +461,49 @@ main :: proc() {
 		}
 	}
 
-	// Cell metrics: width from max ASCII advance (stable for monospace).
-	max_adv: c.int = 1
-	for cp := rune(32); cp <= rune(126); cp += 1 {
-		adv := rl.GetGlyphInfo(Active_Font[0], cp).advanceX
-		if adv > max_adv { max_adv = adv }
-	}
-	Cell_W = cast(i32)(max_adv)
+	compute_cell_metrics()
 
-	Cell_H = cast(i32)(Active_Font[0].baseSize)
-	// Invariant: Cell_H > 0 by construction (font baseSize is expected > 0).
+	// -------------------------------------------------------------------------
+	// Publish Lua globals (depends on window + cell metrics)
+	// -------------------------------------------------------------------------
+	update_lua_globals(L)
 
-	// Lua state.
-	L := lua.L_newstate()
-	defer lua.close(L)
-	lua.L_openlibs(L)
-
-	// Bind Lua surface (tables + globals).
-	bind_lua_api(L)
-
-	// Load main.lua next to the executable.
-	engine_dir := filepath.dir(os.args[0])
-	main_path, jerr := filepath.join([]string{engine_dir, "main.lua"})
-	if jerr != .None {
-		fmt.printf("tuicore: filepath.join failed: %v\n", jerr)
-		return
-	}
-	defer delete(main_path)
-
-	main_cstr, cerr := strings.clone_to_cstring(main_path)
-	if cerr != .None {
-		fmt.printf("tuicore: clone_to_cstring failed: %v\n", cerr)
-		return
-	}
-	defer delete(main_cstr)
-
-	if lua.L_dofile(L, main_cstr) != lua.Status.OK {
-		err := lua.tostring(L, -1)
-		fmt.printf("Lua load error:\n%s\n", err)
-		lua.settop(L, 0)
-		return
-	}
-	lua.settop(L, 0)
-
-	// Lua init.
-	if !call_lua_noargs(L, cstring("init_terminal")) { return }
-
-	// Main loop.
+	// -------------------------------------------------------------------------
+	// Main loop
+	// -------------------------------------------------------------------------
 	for !rl.WindowShouldClose() {
-		frame_t0 := rl.GetTime()
+		frame_start_s := rl.GetTime()
 
 		if rl.IsWindowResized() {
 			update_lua_globals(L)
 		}
 
-		dt := cast(f64)(rl.GetFrameTime()) // raylib last-frame delta (seconds)
+		dt_s := cast(f64)(rl.GetFrameTime()) // last-frame delta (seconds)
 
-		// Time Lua update.
-		u0 := rl.GetTime()
-		ok_upd := call_lua_number(L, cstring("update_terminal"), dt)
-		u1 := rl.GetTime()
-		update_dt := u1 - u0
-		if !ok_upd { break }
+		// --- Lua update ---
+		update_start_s := rl.GetTime()
+		ok_upd := call_lua_number(L, cstring("update_terminal"), dt_s)
+		update_end_s := rl.GetTime()
+		update_s := update_end_s - update_start_s
+		if !ok_upd {
+			break
+		}
 
-		// Time Lua draw (CPU time spent in draw_terminal + draw.* callbacks).
+		// --- Lua draw (CPU time spent in draw_terminal + draw.* callbacks) ---
 		rl.BeginDrawing()
-		d0 := rl.GetTime()
+		draw_start_s := rl.GetTime()
 		ok_draw := call_lua_noargs(L, cstring("draw_terminal"))
-		d1 := rl.GetTime()
+		draw_end_s := rl.GetTime()
 		rl.EndDrawing()
-		draw_dt := d1 - d0
-		if !ok_draw { break }
+		draw_s := draw_end_s - draw_start_s
+		if !ok_draw {
+			break
+		}
 
-		frame_t1 := rl.GetTime()
-		frame_dt := frame_t1 - frame_t0
+		frame_end_s := rl.GetTime()
+		frame_s := frame_end_s - frame_start_s
 
-		update_perf_test(frame_dt, update_dt, draw_dt)
+		update_perf_test(frame_s, update_s, draw_s)
 	}
 }
 

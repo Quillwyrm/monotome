@@ -1,3 +1,66 @@
+## Phase 0: Wiring skeleton
+
+* `register_lua_api(L)` creates `window` table and registers **stubs** for everything (each returns a “not implemented” Lua error).
+* Goal: you can boot Lua and see `window.*` exists.
+
+## Phase 1: Minimal “proof it works”
+
+Implement only:
+
+* `window.init(w,h,title, opts?)`
+* `window.close()`
+* `window.get_size()`
+* `window.set_title(title)`
+* `window.set_fps_limit(n)`
+* `window.is_focused()`
+
+Goal: from Lua you can open a window, set title/FPS, query size/focus, close cleanly.
+
+## Phase 2: Geometry control
+
+Add:
+
+* `set_size`, `set_position`
+* `get_position`, `get_monitor`
+* `set_min_size`, `set_max_size`
+
+Goal: you can move/resize and verify returned values.
+
+## Phase 3: Window state toggles that can’t fight
+
+Add:
+
+* `set_mode(mode)` + `get_mode()` (engine-tracked)
+* `set_resizable(bool)`
+* `maximize/minimize/restore`
+* `is_minimized/is_maximized`
+
+Goal: mode transitions are deterministic and `get_mode()` is always authoritative.
+
+## Phase 4: Cursor + decoration
+
+Add:
+
+* `set_cursor_hidden`, `is_cursor_hidden`, `is_cursor_on_screen`
+* `set_undecorated(bool)` with your contract (“windowed-only; ignored/cleared otherwise”)
+
+Goal: mouse and chrome behavior works and doesn’t contradict mode.
+
+## Phase 5: Flags completeness + polish
+
+* Ensure every `opts` flag string in your list is mapped. 
+* Decide and document: unknown flag string = error (recommended).
+* Add tiny Lua-side test script(s) that exercise each call.
+
+If you want to go even leaner: do Phases 1–3 first, then everything else is gravy.
+
+
+---
+---
+---
+
+
+
 ## Phase 3 breakdown (tuicore)
 
 ### Phase 3A — Fonts + real cell metrics (no glyph drawing yet)
