@@ -2,14 +2,28 @@ package main
 
 // api_window.odin
 //
-// window.* Lua API (single-window, desktop).
+// window.* Lua API (single-window, desktop), backed by raylib.
 //
-// Rules for this implementation:
-// - No libc imports. No CRT nonsense.
-// - No sugar helpers.
-// - No defensive “unknown flag/mode” errors (ignored/no-op for now).
-// - Clarity > cleverness.
-// - Mode is derived from raylib state (no engine-tracked authoritative variable).
+// Intent:
+// - Flat, direct mapping to raylib window/cursor calls.
+// - No extra state tracked in the engine (mode is derived from raylib state).
+// - Fail-fast on wrong argument types (Lua checks); unknown flag/mode tokens are ignored for now.
+//
+// opts (init) is a flat array of strings:
+//   window.init(w, h, title, { "vsync_on", "resizable", ... })
+//
+// Supported opts tokens (others ignored):
+// - "vsync_on"            -> VSYNC_HINT
+// - "fullscreen_mode"     -> FULLSCREEN_MODE
+// - "resizable"           -> WINDOW_RESIZABLE
+// - "undecorated"         -> WINDOW_UNDECORATED
+// - "hidden"              -> WINDOW_HIDDEN
+// - "minimized"           -> WINDOW_MINIMIZED
+// - "maximized"           -> WINDOW_MAXIMIZED
+// - "unfocused"           -> WINDOW_UNFOCUSED
+// - "topmost"             -> WINDOW_TOPMOST
+// - "mouse_passthrough"   -> WINDOW_MOUSE_PASSTHROUGH
+// - "borderless_windowed" -> BORDERLESS_WINDOWED_MODE
 
 import "core:c"
 import "core:strings"
@@ -17,11 +31,11 @@ import "core:strings"
 import lua "luajit"
 import rl  "vendor:raylib"
 
-
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Registration
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
+// register_window_api creates the global Lua table `window` and installs all functions.
 register_window_api :: proc(L: ^lua.State) {
 	lua.newtable(L)
 
@@ -61,13 +75,12 @@ register_window_api :: proc(L: ^lua.State) {
 	lua.setglobal(L, cstring("window"))
 }
 
-
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Init opts -> raylib ConfigFlags
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
-// opts table is expected to be a flat array: { "vsync_on", "resizable", ... }.
-// Unknown strings are ignored (no error handling yet).
+// window_config_flags_from_opts converts a Lua opts table into raylib ConfigFlags.
+// Table shape: { "vsync_on", "resizable", ... } (1-based array part).
 window_config_flags_from_opts :: proc "contextless" (L: ^lua.State, idx: c.int) -> rl.ConfigFlags {
 	flags := rl.ConfigFlags{}
 	tidx := lua.Index(idx)
@@ -116,11 +129,11 @@ window_config_flags_from_opts :: proc "contextless" (L: ^lua.State, idx: c.int) 
 	return flags
 }
 
-
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Core
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
+// window.init(w, h, title, opts?) -> creates the window (opts applied via SetConfigFlags before InitWindow).
 lua_window_init :: proc "c" (L: ^lua.State) -> c.int {
 	w := c.int(int(lua.L_checkinteger(L, 1)))
 	h := c.int(int(lua.L_checkinteger(L, 2)))
@@ -135,6 +148,7 @@ lua_window_init :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.close() -> CloseWindow().
 lua_window_close :: proc "c" (L: ^lua.State) -> c.int { rl.CloseWindow(); return 0 }
 lua_window_maximize :: proc "c" (L: ^lua.State) -> c.int { rl.MaximizeWindow(); return 0 }
 lua_window_minimize :: proc "c" (L: ^lua.State) -> c.int { rl.MinimizeWindow(); return 0 }
@@ -151,6 +165,9 @@ lua_window_set_title :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+
+// window.set_title(title) -> SetWindowTitle().
+// window.set_size(w, h) -> SetWindowSize().
 lua_window_set_size :: proc "c" (L: ^lua.State) -> c.int {
 	w := c.int(int(lua.L_checkinteger(L, 1)))
 	h := c.int(int(lua.L_checkinteger(L, 2)))
@@ -158,6 +175,7 @@ lua_window_set_size :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_min_size(w, h) -> SetWindowMinSize().
 lua_window_set_min_size :: proc "c" (L: ^lua.State) -> c.int {
 	w := c.int(int(lua.L_checkinteger(L, 1)))
 	h := c.int(int(lua.L_checkinteger(L, 2)))
@@ -165,6 +183,7 @@ lua_window_set_min_size :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_max_size(w, h) -> SetWindowMaxSize().
 lua_window_set_max_size :: proc "c" (L: ^lua.State) -> c.int {
 	w := c.int(int(lua.L_checkinteger(L, 1)))
 	h := c.int(int(lua.L_checkinteger(L, 2)))
@@ -172,6 +191,7 @@ lua_window_set_max_size :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_position(x, y) -> SetWindowPosition().
 lua_window_set_position :: proc "c" (L: ^lua.State) -> c.int {
 	x := c.int(int(lua.L_checkinteger(L, 1)))
 	y := c.int(int(lua.L_checkinteger(L, 2)))
@@ -179,12 +199,14 @@ lua_window_set_position :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_fps_limit(n) -> SetTargetFPS().
 lua_window_set_fps_limit :: proc "c" (L: ^lua.State) -> c.int {
 	fps := c.int(int(lua.L_checkinteger(L, 1)))
 	rl.SetTargetFPS(fps)
 	return 0
 }
 
+// window.set_vsync(bool) -> Set/Clear VSYNC_HINT window state.
 lua_window_set_vsync :: proc "c" (L: ^lua.State) -> c.int {
 	enable := lua.toboolean(L, 1) != b32(0)
 	if enable {
@@ -195,6 +217,7 @@ lua_window_set_vsync :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_resizable(bool) -> Set/Clear WINDOW_RESIZABLE window state.
 lua_window_set_resizable :: proc "c" (L: ^lua.State) -> c.int {
 	enable := lua.toboolean(L, 1) != b32(0)
 	if enable {
@@ -205,8 +228,7 @@ lua_window_set_resizable :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
-// Normalizes raylib’s toggle API into a “set_mode(mode)” API.
-// Unknown mode strings are ignored (no-op).
+// window.set_mode(mode) -> sets exactly one of: "windowed" | "fullscreen" | "borderless_windowed".
 lua_window_set_mode :: proc "c" (L: ^lua.State) -> c.int {
 	mode_len: c.size_t
 	mode_c := lua.L_checklstring(L, 1, &mode_len)
@@ -243,6 +265,7 @@ lua_window_set_mode :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_undecorated(bool) -> Set/Clear WINDOW_UNDECORATED window state.
 lua_window_set_undecorated :: proc "c" (L: ^lua.State) -> c.int {
 	enable := lua.toboolean(L, 1) != b32(0)
 	if enable {
@@ -253,6 +276,7 @@ lua_window_set_undecorated :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_cursor_hidden(bool) -> HideCursor/ShowCursor.
 lua_window_set_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
 	hide := lua.toboolean(L, 1) != b32(0)
 	if hide {
@@ -263,17 +287,18 @@ lua_window_set_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
-
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Getters
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
+// window.get_size() -> w, h (GetScreenWidth/Height).
 lua_window_get_size :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushinteger(L, lua.Integer(rl.GetScreenWidth()))
 	lua.pushinteger(L, lua.Integer(rl.GetScreenHeight()))
 	return 2
 }
 
+// window.get_position() -> x, y (GetWindowPosition, integer).
 lua_window_get_position :: proc "c" (L: ^lua.State) -> c.int {
 	pos := rl.GetWindowPosition()
 	lua.pushinteger(L, lua.Integer(int(pos.x)))
@@ -281,15 +306,13 @@ lua_window_get_position :: proc "c" (L: ^lua.State) -> c.int {
 	return 2
 }
 
+// window.get_monitor() -> idx (GetCurrentMonitor).
 lua_window_get_monitor :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushinteger(L, lua.Integer(rl.GetCurrentMonitor()))
 	return 1
 }
 
-// Derived mode (no engine-tracked state):
-// - fullscreen wins
-// - else borderless_windowed
-// - else windowed
+// window.get_mode() -> "windowed" | "fullscreen" | "borderless_windowed" (derived from raylib state).
 lua_window_get_mode :: proc "c" (L: ^lua.State) -> c.int {
 	if rl.IsWindowFullscreen() {
 		lua.pushstring(L, cstring("fullscreen"))
@@ -303,33 +326,36 @@ lua_window_get_mode :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
-
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Queries
-//------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
+// window.is_focused() -> IsWindowFocused().
 lua_window_is_focused :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushboolean(L, b32(rl.IsWindowFocused()))
 	return 1
 }
 
+// window.is_minimized() -> IsWindowMinimized().
 lua_window_is_minimized :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushboolean(L, b32(rl.IsWindowMinimized()))
 	return 1
 }
 
+// window.is_maximized() -> IsWindowMaximized().
 lua_window_is_maximized :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushboolean(L, b32(rl.IsWindowMaximized()))
 	return 1
 }
 
+// window.is_cursor_hidden() -> IsCursorHidden().
 lua_window_is_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushboolean(L, b32(rl.IsCursorHidden()))
 	return 1
 }
 
+// window.is_cursor_on_screen() -> IsCursorOnScreen().
 lua_window_is_cursor_on_screen :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushboolean(L, b32(rl.IsCursorOnScreen()))
 	return 1
 }
-
