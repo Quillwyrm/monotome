@@ -4,13 +4,17 @@ package main
 //
 // input.* Lua API (keyboard + mouse), backed by raylib.
 //
+// Core constraint: the Lua input surface is CELL-SPACE ONLY.
+// - Mouse position and mouse delta are expressed in TERMINAL CELL coordinates (ints).
+// - Raylib provides pixels internally; Lua never sees pixels.
+//
 // Lua surface (strings-only tokens):
 // - Keyboard: key_down, key_up, key_pressed, key_released, key_repeat
 // - Text:     get_text() -> string (all UTF-8 typed this frame)
 // - Mouse:    mouse_down, mouse_up, mouse_pressed, mouse_released
-// - Mouse:    mouse_pos() -> x, y
-// - Mouse:    mouse_delta() -> dx, dy
-// - Mouse:    mouse_wheel() -> dx, dy
+// - Mouse:    mouse_pos()   -> cx,  cy   (cell ints)
+// - Mouse:    mouse_delta() -> dcx, dcy  (cell ints; since last frame)
+// - Mouse:    mouse_wheel() -> dx,  dy   (wheel units; numbers)
 //
 // Token rules (canonical, no aliases):
 // - Letters/digits: "a".."z", "0".."9"
@@ -25,7 +29,8 @@ package main
 //                   numpad0..numpad9, numpad., numpad/, numpad*, numpad-, numpad+, numpadenter, numpad=
 //
 // Host requirement:
-// - Call input_begin_frame() once per frame (before Lua update) to refresh text cache.
+// - Call input_begin_frame() once per frame (before Lua update) to refresh per-frame caches.
+// - Cell_W / Cell_H must be initialized by the host (pixel size of one terminal cell).
 
 import rl      "vendor:raylib"
 import lua     "luajit"
@@ -35,17 +40,82 @@ import c       "core:c"
 
 
 // -----------------------------------------------------------------------------
-// Host-driven per-frame text cache
+// Consts
 // -----------------------------------------------------------------------------
 
+// INPUT_TEXT_CAP is the maximum UTF-8 bytes captured for "typed this frame".
 INPUT_TEXT_CAP :: 4096
 
+
+// -----------------------------------------------------------------------------
+// State (host-driven per-frame caches)
+// -----------------------------------------------------------------------------
+
+// Input_Text_Buf stores UTF-8 bytes typed this frame (from raylib GetCharPressed()).
 Input_Text_Buf: [INPUT_TEXT_CAP]u8
+// Input_Text_Len is the number of valid bytes in Input_Text_Buf.
 Input_Text_Len: int
 
-// input_begin_frame refreshes text typed this frame.
-// Call once per frame, before Lua update().
+// Mouse_Cell is a terminal-space coordinate (cell units), not pixels.
+Mouse_Cell :: struct {
+	cx, cy: i32,
+}
+
+// Mouse_Cell_Pos is the cached mouse position in cell coords for the current frame.
+Mouse_Cell_Pos: Mouse_Cell
+// Mouse_Cell_Delta is the cached mouse movement in cell coords since the previous frame.
+Mouse_Cell_Delta: Mouse_Cell
+// Mouse_Sample_Initialized is false until we have taken at least one frame sample.
+Mouse_Sample_Initialized: bool
+
+// NOTE: Cell_W / Cell_H are defined by the host (tuicore.odin) as i32 globals.
+// They represent the pixel size of one terminal cell.
+
+
+// -----------------------------------------------------------------------------
+// Internal helpers (cell-space mouse conversion)
+// -----------------------------------------------------------------------------
+
+// sample_mouse_cell returns the current mouse position in terminal cell coordinates.
+// Policy: floor(px / Cell_W) for hit-testing; negative window positions become -1.
+sample_mouse_cell :: proc "contextless" () -> Mouse_Cell {
+	// If cell metrics are not ready, return an obvious invalid cell.
+	if Cell_W <= 0 || Cell_H <= 0 {
+		return { -1, -1 }
+	}
+
+	pos := rl.GetMousePosition()
+
+	// Guard negative floats before casting: cast(f32->i32) truncates toward 0.
+	px: i32 = -1
+	py: i32 = -1
+	if pos.x >= 0 {
+		px = cast(i32)(pos.x)
+	}
+	if pos.y >= 0 {
+		py = cast(i32)(pos.y)
+	}
+
+	cx: i32 = -1
+	cy: i32 = -1
+	if px >= 0 {
+		cx = px / Cell_W
+	}
+	if py >= 0 {
+		cy = py / Cell_H
+	}
+
+	return { cx, cy }
+}
+
+
+// -----------------------------------------------------------------------------
+// Host-driven per-frame refresh
+// -----------------------------------------------------------------------------
+
+// input_begin_frame refreshes per-frame input caches (typed text + mouse cell sample).
 input_begin_frame :: proc() {
+	// ---- text typed this frame ----
 	Input_Text_Len = 0
 
 	for {
@@ -59,7 +129,7 @@ input_begin_frame :: proc() {
 			continue
 		}
 		if Input_Text_Len + n > INPUT_TEXT_CAP {
-			break // truncate (cap is huge for “typed this frame”)
+			break // truncate
 		}
 
 		for i in 0..<n {
@@ -67,6 +137,20 @@ input_begin_frame :: proc() {
 		}
 		Input_Text_Len += n
 	}
+
+	// ---- mouse sample in cell space (once per frame) ----
+	cur := sample_mouse_cell()
+
+	if Mouse_Sample_Initialized {
+		Mouse_Cell_Delta.cx = cur.cx - Mouse_Cell_Pos.cx
+		Mouse_Cell_Delta.cy = cur.cy - Mouse_Cell_Pos.cy
+	} else {
+		Mouse_Cell_Delta.cx = 0
+		Mouse_Cell_Delta.cy = 0
+		Mouse_Sample_Initialized = true
+	}
+
+	Mouse_Cell_Pos = cur
 }
 
 
@@ -74,6 +158,7 @@ input_begin_frame :: proc() {
 // Registration
 // -----------------------------------------------------------------------------
 
+// register_input_api registers the tuicore.input Lua module table and its functions.
 register_input_api :: proc(L: ^lua.State) {
 	lua.newtable(L)
 
@@ -106,6 +191,7 @@ register_input_api :: proc(L: ^lua.State) {
 // Token parsing + mapping (strings-only, fail-fast)
 // -----------------------------------------------------------------------------
 
+// check_lua_token reads a required Lua string argument and returns (string view, cstring ptr, byte length).
 check_lua_token :: proc(L: ^lua.State, arg: c.int, who: cstring) -> (tok: string, p: cstring, n: int) {
 	n_sz: c.size_t
 	p = lua.L_checklstring(L, arg, &n_sz)
@@ -121,6 +207,7 @@ check_lua_token :: proc(L: ^lua.State, arg: c.int, who: cstring) -> (tok: string
 	return
 }
 
+// key_from_token maps a canonical key token to a raylib KeyboardKey (returns ok=false if unknown).
 key_from_token :: proc "contextless" (tok: string) -> (rl.KeyboardKey, bool) {
 	// Fast path: single-byte ASCII tokens for letters/digits/punctuation.
 	if len(tok) == 1 {
@@ -259,8 +346,8 @@ key_from_token :: proc "contextless" (tok: string) -> (rl.KeyboardKey, bool) {
 	return .KEY_NULL, false
 }
 
+// mouse_from_token maps a canonical mouse button token to a raylib MouseButton (returns ok=false if unknown).
 mouse_from_token :: proc "contextless" (tok: string) -> (rl.MouseButton, bool) {
-	// Keep this tiny and canonical.
 	switch tok {
 	case "left":   return .LEFT, true
 	case "right":  return .RIGHT, true
@@ -271,9 +358,10 @@ mouse_from_token :: proc "contextless" (tok: string) -> (rl.MouseButton, bool) {
 
 
 // -----------------------------------------------------------------------------
-// Lua API
+// Lua API (keyboard)
 // -----------------------------------------------------------------------------
 
+// input.key_down(tok) -> bool: true while the key is held down.
 lua_input_key_down :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -286,6 +374,7 @@ lua_input_key_down :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
+// input.key_up(tok) -> bool: true while the key is not held down.
 lua_input_key_up :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -298,6 +387,7 @@ lua_input_key_up :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
+// input.key_pressed(tok) -> bool: true on the frame the key transitions up->down.
 lua_input_key_pressed :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -310,6 +400,7 @@ lua_input_key_pressed :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
+// input.key_released(tok) -> bool: true on the frame the key transitions down->up.
 lua_input_key_released :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -322,6 +413,7 @@ lua_input_key_released :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
+// input.key_repeat(tok) -> bool: true on key repeat events while the key is held.
 lua_input_key_repeat :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -334,7 +426,12 @@ lua_input_key_repeat :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
-// input.get_text() -> string (UTF-8 typed this frame, possibly empty)
+
+// -----------------------------------------------------------------------------
+// Lua API (text)
+// -----------------------------------------------------------------------------
+
+// input.get_text() -> string: UTF-8 text typed this frame (may be empty).
 lua_input_get_text :: proc "c" (L: ^lua.State) -> c.int {
 	if Input_Text_Len <= 0 {
 		lua.pushlstring(L, cstring(""), 0)
@@ -346,6 +443,12 @@ lua_input_get_text :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
+
+// -----------------------------------------------------------------------------
+// Lua API (mouse buttons)
+// -----------------------------------------------------------------------------
+
+// input.mouse_down(btn) -> bool: true while the mouse button is held.
 lua_input_mouse_down :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -358,6 +461,7 @@ lua_input_mouse_down :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
+// input.mouse_up(btn) -> bool: true while the mouse button is not held.
 lua_input_mouse_up :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -370,6 +474,7 @@ lua_input_mouse_up :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
+// input.mouse_pressed(btn) -> bool: true on the frame the button transitions up->down.
 lua_input_mouse_pressed :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -382,6 +487,7 @@ lua_input_mouse_pressed :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
+// input.mouse_released(btn) -> bool: true on the frame the button transitions down->up.
 lua_input_mouse_released :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -394,23 +500,40 @@ lua_input_mouse_released :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
-// input.mouse_pos() -> x, y (integers)
+
+// -----------------------------------------------------------------------------
+// Lua API (mouse motion in cell space)
+// -----------------------------------------------------------------------------
+
+// input.mouse_pos() -> cx, cy: current mouse position in terminal cell coordinates.
 lua_input_mouse_pos :: proc "c" (L: ^lua.State) -> c.int {
-	pos := rl.GetMousePosition()
-	lua.pushinteger(L, lua.Integer(int(pos.x)))
-	lua.pushinteger(L, lua.Integer(int(pos.y)))
+	if Mouse_Sample_Initialized {
+		lua.pushinteger(L, cast(lua.Integer)(Mouse_Cell_Pos.cx))
+		lua.pushinteger(L, cast(lua.Integer)(Mouse_Cell_Pos.cy))
+		return 2
+	}
+
+	// If called before the first frame sample, return a live sample (still cell space).
+	cur := sample_mouse_cell()
+	lua.pushinteger(L, cast(lua.Integer)(cur.cx))
+	lua.pushinteger(L, cast(lua.Integer)(cur.cy))
 	return 2
 }
 
-// input.mouse_delta() -> dx, dy (numbers)
+// input.mouse_delta() -> dcx, dcy: mouse movement in terminal cell coordinates since the previous frame.
 lua_input_mouse_delta :: proc "c" (L: ^lua.State) -> c.int {
-	d := rl.GetMouseDelta()
-	lua.pushnumber(L, lua.Number(d.x))
-	lua.pushnumber(L, lua.Number(d.y))
+	if !Mouse_Sample_Initialized {
+		lua.pushinteger(L, 0)
+		lua.pushinteger(L, 0)
+		return 2
+	}
+
+	lua.pushinteger(L, cast(lua.Integer)(Mouse_Cell_Delta.cx))
+	lua.pushinteger(L, cast(lua.Integer)(Mouse_Cell_Delta.cy))
 	return 2
 }
 
-// input.mouse_wheel() -> dx, dy (numbers)
+// input.mouse_wheel() -> dx, dy: wheel units from raylib (not pixels; typically fractional).
 lua_input_mouse_wheel :: proc "c" (L: ^lua.State) -> c.int {
 	w := rl.GetMouseWheelMoveV()
 	lua.pushnumber(L, lua.Number(w.x))
