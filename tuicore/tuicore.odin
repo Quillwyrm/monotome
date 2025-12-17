@@ -25,21 +25,38 @@ import c        "core:c"
 // -----------------------------------------------------------------------------
 
 // User-facing font size (UI points, typical editor UX).
-Font_Pt: c.int = 18
+Font_Pt: c.int = 24
 
 // Internal raster size passed to LoadFontEx (computed at startup).
 Font_Px: c.int
 
 // Face order: 0=Regular, 1=Bold, 2=Italic, 3=BoldItalic.
-Font_Path: [4]cstring = {
+
+// Fixed storage for font paths (NUL-terminated for raylib).
+MAX_FONT_PATH_BYTES :: 4096
+
+// Defaults (used if Lua does not call font.init/set_paths before first load).
+Default_Font_Path: [4]cstring = {
+
 	cstring("C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Regular.ttf"),
 	cstring("C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Bold.ttf"),
 	cstring("C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-Italic.ttf"),
 	cstring("C:\\dev\\dev_tuicore\\tuicore\\fonts\\JetBrainsMono-BoldItalic.ttf"),
 }
 
-Active_Font: [4]rl.Font
 
+// Runtime path state (single source of truth).
+Font_Path_Buf: [4][MAX_FONT_PATH_BYTES]u8
+Font_Path_Len: [4]int
+Font_Path: [4]cstring
+
+Active_Font: [4]rl.Font
+Fonts_Loaded: bool
+
+// Prebuilt codepoint lists (allocated once; reused on rebuild).
+Base_Codepoints: []rune
+Regular_Codepoints: []rune
+Regular_Written: int
 // Cell metrics in pixels.
 Cell_W: i32
 Cell_H: i32
@@ -132,6 +149,7 @@ register_lua_api :: proc(L: ^lua.State) {
 	register_draw_api(L)
 	register_window_api(L)
 	register_input_api(L)
+	register_font_api(L)
 }
 
 // -----------------------------------------------------------------------------
@@ -186,6 +204,76 @@ call_lua_number :: proc(L: ^lua.State, name: cstring, x: f64) -> bool {
 // -----------------------------------------------------------------------------
 // Font pipeline helpers
 // -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Font config storage (paths) + rebuild orchestration
+// -----------------------------------------------------------------------------
+
+set_font_path_bytes :: proc(face: int, p: [^]u8, n: int) {
+	if face < 0 || face > 3 {
+		panic("set_font_path_bytes: face out of range")
+	}
+	if n <= 0 {
+		panic("set_font_path_bytes: empty path")
+	}
+	if n >= MAX_FONT_PATH_BYTES {
+		panic("set_font_path_bytes: path too long for fixed buffer")
+	}
+
+	for i in 0..<n {
+		Font_Path_Buf[face][i] = p[i]
+	}
+	Font_Path_Buf[face][n] = 0
+	Font_Path_Len[face] = n
+	Font_Path[face] = cast(cstring)(&Font_Path_Buf[face][0])
+}
+
+init_font_paths_defaults :: proc() {
+	for face in 0..<4 {
+		src := cast([^]u8)(Default_Font_Path[face])
+
+		n := 0
+		for n < MAX_FONT_PATH_BYTES-1 {
+			b := src[n]
+			if b == 0 {
+				break
+			}
+			Font_Path_Buf[face][n] = b
+			n += 1
+		}
+		Font_Path_Buf[face][n] = 0
+		Font_Path_Len[face] = n
+		Font_Path[face] = cast(cstring)(&Font_Path_Buf[face][0])
+	}
+}
+
+unload_active_fonts :: proc() {
+	if !Fonts_Loaded {
+		return
+	}
+	for i in 0..<4 {
+		rl.UnloadFont(Active_Font[i])
+	}
+	Fonts_Loaded = false
+}
+
+rebuild_fonts :: proc(L: ^lua.State) {
+	unload_active_fonts()
+
+	font_px := compute_font_px()
+	load_active_fonts(font_px, Base_Codepoints, Regular_Codepoints, Regular_Written)
+	compute_cell_metrics()
+	Fonts_Loaded = true
+
+	update_lua_globals(L)
+}
+
+ensure_fonts_loaded :: proc(L: ^lua.State) {
+	if Fonts_Loaded {
+		return
+	}
+	rebuild_fonts(L)
+}
 
 // compute_font_px converts UI points (Font_Pt) into a pixel size used by LoadFontEx.
 // Also writes Font_Px.
@@ -271,6 +359,9 @@ main :: proc() {
 
 	register_lua_api(L)
 
+	init_font_paths_defaults()
+	Base_Codepoints, Regular_Codepoints, Regular_Written = build_codepoint_lists()
+
 	rl.SetTraceLogLevel(rl.TraceLogLevel.ERROR)
 
 
@@ -300,23 +391,8 @@ main :: proc() {
 	// -------------------------------------------------------------------------
 	// Font + cell metrics (needs window)
 	// -------------------------------------------------------------------------
-	font_px := compute_font_px()
-
-	base_codepoints, regular_codepoints, regular_written := build_codepoint_lists()
-	load_active_fonts(font_px, base_codepoints, regular_codepoints, regular_written)
-
-	defer {
-		for i in 0..<4 {
-			rl.UnloadFont(Active_Font[i])
-		}
-	}
-
-	compute_cell_metrics()
-
-	// -------------------------------------------------------------------------
-	// Publish Lua globals (depends on window + cell metrics)
-	// -------------------------------------------------------------------------
-	update_lua_globals(L)
+	ensure_fonts_loaded(L)
+	defer unload_active_fonts()
 
 	// -------------------------------------------------------------------------
 	// Main loop
@@ -347,5 +423,4 @@ main :: proc() {
 		rl.EndDrawing()
 	}
 }
-
 

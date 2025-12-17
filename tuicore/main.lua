@@ -1,6 +1,7 @@
 local window = require("tuicore.window")
 local draw   = require("tuicore.draw")
 local input  = require("tuicore.input")
+local font   = require("tuicore.font")
 
 -- colors {r,g,b,a}
 local C_BG        = { 16, 18, 24, 255 }
@@ -30,7 +31,7 @@ local state = {
   last_input = "<none>",
   last_input_age = 999,
 
-  -- demo entity
+  -- demo entity (cell-space)
   px = 0,
   py = 0,
 
@@ -51,6 +52,13 @@ function init_terminal()
   window.init(960, 540, "tuicore input test", { "vsync_on", "resizable" })
   window.set_fps_limit(60)
   window.set_cursor_hidden(true)
+
+  font.init(14,{
+    "C:/Users/theja/AppData/Local/Microsoft/Windows/Fonts/IosevkaQuillwyrm-Regular.ttf",
+    "C:/Users/theja/AppData/Local/Microsoft/Windows/Fonts/IosevkaQuillwyrm-Bold.ttf",
+    "C:/Users/theja/AppData/Local/Microsoft/Windows/Fonts/IosevkaQuillwyrm-Italic.ttf",
+    "C:/Users/theja/AppData/Local/Microsoft/Windows/Fonts/IosevkaQuillwyrm-BoldItalic.ttf"
+  })
 end
 
 -- utf8_pop removes the last UTF-8 codepoint (good enough for typed-buffer editing).
@@ -274,8 +282,23 @@ local function row_mouse_states(x, y, label, btn)
   mark(bx + 11, y, (state.mouse_r[btn] ~= nil), "●", "·", C_EDGE, C_OFF)
 end
 
+-- layout: make INFO wide, WORLD narrow.
+-- returns panel_w, world_x0, world_x1
+local function layout(cols)
+  local min_world = 18
+  local panel_w = math.floor(cols * 0.72)
+  if panel_w > cols - min_world - 2 then panel_w = cols - min_world - 2 end
+  if panel_w < 0 then panel_w = 0 end
+  local world_x0 = panel_w + 2
+  local world_x1 = cols - 1
+  return panel_w, world_x0, world_x1
+end
+
 -- update_terminal advances the demo + captures input state for rendering.
 function update_terminal(dt)
+  local cols, rows = window.grid_size()
+  if cols <= 0 or rows <= 0 then return end
+
   state.t = state.t + dt
 
   -- fade pulse timers
@@ -316,15 +339,12 @@ function update_terminal(dt)
     state.typed = utf8_pop(state.typed)
   end
 
-  -- layout (left panel is wide; world is to the right)
-  local panel_w = math.min(60, math.max(44, math.floor(TERM_COLS * 0.52)))
-  local world_x0 = panel_w + 2
-  local world_x1 = TERM_COLS - 1
+  local panel_w, world_x0, world_x1 = layout(cols)
 
   -- initial placement (only once)
   if state.px == 0 and state.py == 0 then
     state.px = world_x0 + 2
-    state.py = 7
+    state.py = 6
   end
 
   -- move @ with WASD (hold)
@@ -335,7 +355,7 @@ function update_terminal(dt)
 
   -- keep inside world bounds
   state.px = clamp(state.px, world_x0, world_x1)
-  state.py = clamp(state.py, 0, TERM_ROWS - 1)
+  state.py = clamp(state.py, 0, rows - 1)
 
   -- mouse cell-space (tuicore.input is cell-native)
   local mx, my = input.mouse_pos()
@@ -351,7 +371,7 @@ function update_terminal(dt)
   -- teleport @ on left click (cell-space)
   if input.mouse_pressed("left") then
     state.px = clamp(mx, world_x0, world_x1)
-    state.py = clamp(my, 0, TERM_ROWS - 1)
+    state.py = clamp(my, 0, rows - 1)
   end
 
   -- wheel (accumulate so you can see it)
@@ -364,31 +384,43 @@ end
 
 -- draw_terminal renders the UI + demo world.
 function draw_terminal()
+  local cols, rows = window.grid_size()
+  if cols <= 0 or rows <= 0 then return end
+
   draw.clear(C_BG)
 
-  local panel_w  = math.min(60, math.max(44, math.floor(TERM_COLS * 0.52)))
-  local world_x0 = panel_w + 2
+  local panel_w, world_x0, world_x1 = layout(cols)
+  local world_w = cols - world_x0
 
   -- left panel background + divider
-  draw.rect(0, 0, panel_w, TERM_ROWS, C_PANEL)
-  draw.rect(panel_w, 0, 1, TERM_ROWS, C_LINE)
+  if panel_w > 0 then
+    draw.rect(0, 0, panel_w, rows, C_PANEL)
+    draw.rect(panel_w, 0, 1, rows, C_LINE)
+  end
 
-  -- world header
-  draw.text(world_x0, 0, "tuicore input test (cell-space mouse)", C_TEXT)
-  draw.text(world_x0, 1, "type text, hold WASD, backspace edits, left-click teleports @", C_MUTED)
-
-  -- mouse info (cell-space)
-  local mx, my = input.mouse_pos()
-  local dx, dy = input.mouse_delta()
-  local wx, wy = input.mouse_wheel()
-  draw.text(world_x0, 3, string.format("mouse cell: %d,%d   delta: %d,%d   wheel: %.2f,%.2f", mx, my, dx, dy, wx, wy), C_MUTED)
+  -- world column background (narrow play space)
+  if world_w > 0 then
+    draw.rect(world_x0, 0, world_w, rows, C_PANEL_2)
+  end
 
   -- demo entity
   draw.glyph(state.px, state.py, C_ACCENT, "@", 0)
 
+  -- mouse cursor overlay (draw LAST so it's above everything)
+  local mx, my = input.mouse_pos()
+  if mx >= 0 and mx < cols and my >= 0 and my < rows then
+    draw.glyph(mx, my, C_ACCENT, "┼", 0)
+  end
+
   -- left panel content
   local x = 2
   local y = 1
+
+  -- INFO header (more room now)
+  local cell_w, cell_h = window.cell_size()
+  draw.text(x, y, "INFO", C_TEXT) ; y = y + 1
+  draw.text(x, y, string.format("grid: %d x %d   cell: %d x %d", cols, rows, cell_w, cell_h), C_MUTED) ; y = y + 1
+  draw.text(x, y, string.format("world: x=[%d..%d] (w=%d)", world_x0, world_x1, world_w), C_MUTED) ; y = y + 2
 
   draw.text(x, y, "INPUT", C_TEXT) ; y = y + 2
 
@@ -416,7 +448,7 @@ function draw_terminal()
   local box_w = panel_w - 4
 
   local last_h = 5
-  local buf_h  = math.max(7, TERM_ROWS - (y + 2) - 3)
+  local buf_h  = math.max(7, rows - (y + 2) - 3)
 
   local last_title = string.format("last input (%.2fs ago)", state.last_input_age)
   draw_boxed_text(box_x, y, box_w, last_h, last_title, (state.last_input ~= "" and state.last_input or "<none>"), C_MUTED, C_TEXT)
@@ -424,12 +456,12 @@ function draw_terminal()
 
   draw_boxed_text(box_x, y, box_w, buf_h, "typed buffer", (state.typed ~= "" and state.typed or "<empty>"), C_MUTED, C_WARN)
 
-  -- footer
-  draw.text(world_x0, TERM_ROWS - 1, string.format("wheel sum: %.2f, %.2f", state.wheel_x, state.wheel_y), C_MUTED)
-
-  -- mouse cursor overlay (draw LAST so it's above everything)
-  if mx >= 0 and mx < TERM_COLS and my >= 0 and my < TERM_ROWS then
-    draw.glyph(mx, my, C_ACCENT, "┼", 0)
+  -- tiny world column info (keep short; column is narrow)
+  if world_w > 0 then
+    draw.text(world_x0, 0, "WORLD", C_TEXT)
+    draw.text(world_x0, 1, "WASD move", C_MUTED)
+    draw.text(world_x0, 2, "LMB tp", C_MUTED)
+    draw.text(world_x0, rows - 1, string.format("wheel: %.1f,%.1f", state.wheel_x, state.wheel_y), C_MUTED)
   end
 end
 

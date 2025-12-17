@@ -59,11 +59,18 @@ register_window_api :: proc(L: ^lua.State) {
 	lua.pushcfunction(L, lua_window_set_undecorated)   ; lua.setfield(L, -2, cstring("set_undecorated"))
 	lua.pushcfunction(L, lua_window_set_cursor_hidden) ; lua.setfield(L, -2, cstring("set_cursor_hidden"))
 
-	// getters
-	lua.pushcfunction(L, lua_window_get_size)     ; lua.setfield(L, -2, cstring("get_size"))
-	lua.pushcfunction(L, lua_window_get_position) ; lua.setfield(L, -2, cstring("get_position"))
-	lua.pushcfunction(L, lua_window_get_monitor)  ; lua.setfield(L, -2, cstring("get_monitor"))
-	lua.pushcfunction(L, lua_window_get_mode)     ; lua.setfield(L, -2, cstring("get_mode"))
+	// info
+	lua.pushcfunction(L, lua_window_pixel_size) ; lua.setfield(L, -2, cstring("pixel_size"))
+	lua.pushcfunction(L, lua_window_position)   ; lua.setfield(L, -2, cstring("position"))
+	lua.pushcfunction(L, lua_window_monitor)    ; lua.setfield(L, -2, cstring("monitor"))
+	lua.pushcfunction(L, lua_window_mode)       ; lua.setfield(L, -2, cstring("mode"))
+
+	// cell-space geometry
+	lua.pushcfunction(L, lua_window_cell_size)  ; lua.setfield(L, -2, cstring("cell_size"))
+	lua.pushcfunction(L, lua_window_grid_size)  ; lua.setfield(L, -2, cstring("grid_size"))
+
+	// snapshot table for layout save/restore
+	lua.pushcfunction(L, lua_window_metrics)    ; lua.setfield(L, -2, cstring("metrics"))
 
 	// queries
 	lua.pushcfunction(L, lua_window_is_focused)          ; lua.setfield(L, -2, cstring("is_focused"))
@@ -292,32 +299,32 @@ lua_window_set_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
 }
 
 // -----------------------------------------------------------------------------
-// Getters
+// Info
 // -----------------------------------------------------------------------------
 
-// window.get_size() -> w, h (GetScreenWidth/Height).
-lua_window_get_size :: proc "c" (L: ^lua.State) -> c.int {
+// window.pixel_size() -> px_w, px_h (GetScreenWidth/Height).
+lua_window_pixel_size :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushinteger(L, lua.Integer(rl.GetScreenWidth()))
 	lua.pushinteger(L, lua.Integer(rl.GetScreenHeight()))
 	return 2
 }
 
-// window.get_position() -> x, y (GetWindowPosition, integer).
-lua_window_get_position :: proc "c" (L: ^lua.State) -> c.int {
+// window.position() -> x, y (GetWindowPosition, integer).
+lua_window_position :: proc "c" (L: ^lua.State) -> c.int {
 	pos := rl.GetWindowPosition()
 	lua.pushinteger(L, lua.Integer(int(pos.x)))
 	lua.pushinteger(L, lua.Integer(int(pos.y)))
 	return 2
 }
 
-// window.get_monitor() -> idx (GetCurrentMonitor).
-lua_window_get_monitor :: proc "c" (L: ^lua.State) -> c.int {
+// window.monitor() -> idx (GetCurrentMonitor).
+lua_window_monitor :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushinteger(L, lua.Integer(rl.GetCurrentMonitor()))
 	return 1
 }
 
-// window.get_mode() -> "windowed" | "fullscreen" | "borderless_windowed" (derived from raylib state).
-lua_window_get_mode :: proc "c" (L: ^lua.State) -> c.int {
+// window.mode() -> "windowed" | "fullscreen" | "borderless_windowed" (derived from raylib state).
+lua_window_mode :: proc "c" (L: ^lua.State) -> c.int {
 	if rl.IsWindowFullscreen() {
 		lua.pushstring(L, cstring("fullscreen"))
 		return 1
@@ -327,6 +334,67 @@ lua_window_get_mode :: proc "c" (L: ^lua.State) -> c.int {
 		return 1
 	}
 	lua.pushstring(L, cstring("windowed"))
+	return 1
+}
+
+// window.cell_size() -> cell_w, cell_h.
+// Cell metrics must be ready (computed after fonts are loaded).
+lua_window_cell_size :: proc "c" (L: ^lua.State) -> c.int {
+	if Cell_W <= 0 || Cell_H <= 0 {
+		return lua.L_error(L, cstring("window.cell_size: cell metrics not ready"))
+	}
+	lua.pushinteger(L, cast(lua.Integer)(Cell_W))
+	lua.pushinteger(L, cast(lua.Integer)(Cell_H))
+	return 2
+}
+
+// window.grid_size() -> cols, rows.
+// Derived from render size and cell metrics.
+lua_window_grid_size :: proc "c" (L: ^lua.State) -> c.int {
+	if Cell_W <= 0 || Cell_H <= 0 {
+		return lua.L_error(L, cstring("window.grid_size: cell metrics not ready"))
+	}
+	render_w := cast(i32)(rl.GetRenderWidth())
+	render_h := cast(i32)(rl.GetRenderHeight())
+	cols := render_w / Cell_W
+	rows := render_h / Cell_H
+	lua.pushinteger(L, cast(lua.Integer)(cols))
+	lua.pushinteger(L, cast(lua.Integer)(rows))
+	return 2
+}
+
+// window.metrics() -> table snapshot for layout save/restore.
+//
+// Returns:
+// { px_w, px_h, cols, rows, cell_w, cell_h, pos_x, pos_y, monitor }
+lua_window_metrics :: proc "c" (L: ^lua.State) -> c.int {
+	if Cell_W <= 0 || Cell_H <= 0 {
+		return lua.L_error(L, cstring("window.metrics: cell metrics not ready"))
+	}
+
+	px_w := rl.GetScreenWidth()
+	px_h := rl.GetScreenHeight()
+
+	render_w := cast(i32)(rl.GetRenderWidth())
+	render_h := cast(i32)(rl.GetRenderHeight())
+	cols := render_w / Cell_W
+	rows := render_h / Cell_H
+
+	pos := rl.GetWindowPosition()
+	mon := rl.GetCurrentMonitor()
+
+	lua.newtable(L)
+
+	lua.pushinteger(L, lua.Integer(px_w))           ; lua.setfield(L, -2, cstring("px_w"))
+	lua.pushinteger(L, lua.Integer(px_h))           ; lua.setfield(L, -2, cstring("px_h"))
+	lua.pushinteger(L, cast(lua.Integer)(cols))     ; lua.setfield(L, -2, cstring("cols"))
+	lua.pushinteger(L, cast(lua.Integer)(rows))     ; lua.setfield(L, -2, cstring("rows"))
+	lua.pushinteger(L, cast(lua.Integer)(Cell_W))   ; lua.setfield(L, -2, cstring("cell_w"))
+	lua.pushinteger(L, cast(lua.Integer)(Cell_H))   ; lua.setfield(L, -2, cstring("cell_h"))
+	lua.pushinteger(L, lua.Integer(int(pos.x)))     ; lua.setfield(L, -2, cstring("pos_x"))
+	lua.pushinteger(L, lua.Integer(int(pos.y)))     ; lua.setfield(L, -2, cstring("pos_y"))
+	lua.pushinteger(L, lua.Integer(mon))            ; lua.setfield(L, -2, cstring("monitor"))
+
 	return 1
 }
 
