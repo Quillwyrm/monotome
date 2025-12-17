@@ -1,0 +1,186 @@
+-- main.lua
+-- tuicore draw.* API smoke test (focus: draw.text)
+-- NO helpers. Explicit y increments.
+
+local draw = require("tuicore.draw")
+local window = require("tuicore.window")
+
+local t = 0
+
+local function rgba(r, g, b, a)
+  return { r, g, b, a or 255 }
+end
+
+local function clamp(v, lo, hi)
+  if v < lo then return lo end
+  if v > hi then return hi end
+  return v
+end
+
+local function lerp(a, b, x)
+  return a + (b - a) * x
+end
+
+local function lerp_color(a, b, x)
+  return rgba(
+    math.floor(lerp(a[1], b[1], x)),
+    math.floor(lerp(a[2], b[2], x)),
+    math.floor(lerp(a[3], b[3], x)),
+    math.floor(lerp(a[4], b[4], x))
+  )
+end
+
+local C = {
+  bg0   = rgba(12, 14, 18, 255),
+  bg1   = rgba(18, 22, 30, 255),
+  panel = rgba(24, 28, 38, 255),
+  dim   = rgba(130, 140, 160, 255),
+  text  = rgba(220, 225, 235, 255),
+  hot   = rgba(255, 210, 120, 255),
+  ok    = rgba(120, 240, 180, 255),
+  warn  = rgba(255, 140, 140, 255),
+  blue  = rgba(120, 180, 255, 255),
+  cell0 = rgba(40, 46, 60, 255),
+  cell1 = rgba(60, 70, 90, 255),
+  bar0  = rgba(70, 90, 140, 255),
+  bar1  = rgba(120, 200, 255, 255),
+}
+
+function init_terminal()
+  window.init(1280, 720, "tuicore draw.* smoke test", { "resizable", "vsync_on" })
+  window.set_fps_limit(60)
+  t = 0
+end
+
+function update_terminal(dt)
+  t = t + (dt or 0)
+end
+
+function draw_terminal()
+  local cols = (TERM_COLS and TERM_COLS > 0) and TERM_COLS or 120
+  local rows = (TERM_ROWS and TERM_ROWS > 0) and TERM_ROWS or 40
+
+  -- background
+  local bg_mix = (math.sin(t * 0.7) * 0.5 + 0.5)
+  draw.clear(lerp_color(C.bg0, C.bg1, bg_mix))
+
+  -- header
+  draw.rect(0, 0, cols, 3, C.panel)
+  draw.text(2, 1, "tuicore draw.* smoke test", C.hot)
+  draw.text(2, 2, "clear / rect / cell / glyph / text (len, newline, utf8)", C.dim)
+
+  local y0 = 4
+  if rows <= y0 + 2 then return end
+
+  -- layout
+  local gap = 2
+  local left_w = clamp(math.floor(cols * 0.60), 44, cols - 20)
+  local right_x = left_w + gap
+  local right_w = cols - right_x
+
+  draw.rect(0, y0, left_w, rows - y0, rgba(20, 24, 34, 255))
+  draw.rect(right_x, y0, right_w, rows - y0, rgba(16, 18, 24, 255))
+
+  local x_label = 2
+  local x_val   = 26
+
+  -- LEFT: explicit rows
+  local y = y0 + 1
+
+  -- rect test
+  draw.text(x_label, y, "draw.rect:", C.dim)
+  draw.text(x_val,   y, "bar w=12,h=1", C.text)
+  draw.rect(x_val, y, 12, 1, C.blue)
+  y = y + 2
+
+  -- cell checkerboard (reserve 3 rows)
+  draw.text(x_label, y, "draw.cell:", C.dim)
+  draw.text(x_val,   y, "8x3 checkerboard", C.text)
+  y = y + 1
+  do
+    local bx, by = x_val, y
+    for yy = 0, 2 do
+      for xx = 0, 7 do
+        local c = (((xx + yy) % 2) == 0) and C.cell0 or C.cell1
+        draw.cell(bx + xx, by + yy, c)
+      end
+    end
+  end
+  y = y + 4
+
+  -- glyph faces
+  draw.text(x_label, y, "draw.glyph:", C.dim)
+  draw.text(x_val,   y, "faces 0..3 (A)", C.text)
+  draw.glyph(x_val + 16, y, C.text, "A", 0)
+  draw.glyph(x_val + 18, y, C.text, "A", 1)
+  draw.glyph(x_val + 20, y, C.text, "A", 2)
+  draw.glyph(x_val + 22, y, C.text, "A", 3)
+  y = y + 2
+
+  -- █ special-case
+  draw.text(x_label, y, "glyph █:", C.dim)
+  draw.text(x_val+2, y, "solid cell", C.text)
+  draw.glyph(x_val,  y, rgba(255, 200, 80, 255), "█", 0)
+  y = y + 2
+
+  -- basic text
+  draw.text(x_label, y, "draw.text:", C.dim)
+  draw.text(x_val,   y, "The quick brown fox 123", C.text)
+  y = y + 2
+
+  -- len limit
+  draw.text(x_label, y, "text len:", C.dim)
+  draw.text(x_val,   y, "HELLO_WORLD_012345", C.text, 8)
+  draw.text(x_val+10, y, "(len=8)", C.dim)
+  y = y + 2
+
+  -- newline stop
+  draw.text(x_label, y, "text \\n:", C.dim)
+  draw.text(x_val,   y, "LINE1\nLINE2 SHOULD NOT SHOW", C.text)
+  y = y + 2
+
+  -- utf8
+  draw.text(x_label, y, "utf8:", C.dim)
+  draw.text(x_val,   y, "héllö  αβγ  你好  🙂🔥", C.text)
+  y = y + 2
+  draw.text(x_val,   y, "(depends on font; should not crash)", C.dim)
+  y = y + 2
+
+  -- RIGHT: a few animated things, kept inside right panel
+  if right_w >= 10 then
+    local rx = right_x + 2
+    local ry = y0 + 1
+
+    draw.text(rx, ry, "ANIM", C.hot)
+    draw.text(rx + 6, ry, string.format("t=%.2f", t), C.dim)
+
+    local bar_y = ry + 2
+    local bar_w = clamp(right_w - 4, 10, 60)
+
+    draw.rect(rx, bar_y, bar_w, 1, rgba(30, 40, 60, 255))
+    local f = (math.sin(t * 1.3) * 0.5 + 0.5)
+    local fill = clamp(math.floor(f * bar_w), 0, bar_w)
+    draw.rect(rx, bar_y, fill, 1, lerp_color(C.bar0, C.bar1, f))
+    draw.text(rx, bar_y + 1, "draw.rect fill anim", C.dim)
+
+    local gy = bar_y + 4
+    local gx = rx + clamp(math.floor((math.sin(t * 2.0) * 0.5 + 0.5) * (bar_w - 1)), 0, bar_w - 1)
+    draw.glyph(gx, gy, C.ok, "@", 0)
+    draw.text(rx, gy + 1, "draw.glyph moving '@'", C.dim)
+
+    local ty = gy + 3
+    local dots = math.floor((t * 4) % 4)
+    local msg = "draw.text typing"
+    if dots == 1 then msg = msg .. "." end
+    if dots == 2 then msg = msg .. ".." end
+    if dots == 3 then msg = msg .. "..." end
+    draw.text(rx, ty, msg, C.text)
+  end
+
+  -- footer
+  if rows >= 1 then
+    draw.rect(0, rows - 1, cols, 1, rgba(10, 12, 16, 255))
+    draw.text(2, rows - 1, "If this renders: draw.text is wired. Edit strings/len/newlines above.", C.dim)
+  end
+end
+

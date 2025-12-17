@@ -1,0 +1,426 @@
+-- main.lua
+-- tuicore draw API testbed (cell-based)
+-- goals:
+-- - use draw.rect heavily (panel fills, highlights, selection, scrollbar)
+-- - indent guides line up, and text can cover guides using bg rects
+-- - file tree uses box drawing connectors
+-- - no minimap
+
+local t = 0
+
+local function hex(h, a)
+  h = h:gsub("#","")
+  local r = tonumber(h:sub(1,2), 16)
+  local g = tonumber(h:sub(3,4), 16)
+  local b = tonumber(h:sub(5,6), 16)
+  return {r,g,b,a or 255}
+end
+
+local function clamp(v, lo, hi)
+  if v < lo then return lo end
+  if v > hi then return hi end
+  return v
+end
+
+-- UTF-8 iterator (codepoint by codepoint)
+local function utf8_iter(s)
+  local i, n = 1, #s
+  return function()
+    if i > n then return nil end
+    local c = s:byte(i)
+    local len
+    if c < 0x80 then len = 1
+    elseif c < 0xE0 then len = 2
+    elseif c < 0xF0 then len = 3
+    else len = 4 end
+    local ch = s:sub(i, i + len - 1)
+    i = i + len
+    return ch
+  end
+end
+
+-- --------------------------------------------------------------------------------
+-- Colors (tweak freely)
+-- --------------------------------------------------------------------------------
+
+local C = {
+  bg            = hex"#0f0f10",
+  panel_tree    = hex"#0c0c0d",
+  panel_doc     = hex"#101012",
+  panel_gutter  = hex"#0d0d0f",
+  divider       = hex"#1f1f22",
+  divider_soft  = hex"#17171a",
+
+  text          = hex"#d7d7db",
+  dim           = hex"#5b5b66",
+  dim2          = hex"#3e3e46",
+  accent        = hex"#ffb545",
+  accent2       = hex"#72dec2",
+  warn          = hex"#ff7b72",
+
+  ln            = hex"#555562",
+  ln_hot        = hex"#8a8a98",
+
+  hl_row        = hex"#19191f",
+  hl_tree       = hex"#17171d",
+
+  -- selection should NOT be black; black reads like a bug
+  sel_bg        = hex("#2a2236", 255),
+
+  -- indent guides
+  guide         = hex"#2a2a34",
+  guide_hot     = hex"#3a3a48",
+
+  -- chips / bars
+  chip_bg       = hex"#15151a",
+  status_bg     = hex"#121216",
+  status_bg2    = hex"#0f0f12",
+
+  scroll_track  = hex"#0d0d10",
+  scroll_thumb  = hex"#2a2a32",
+  scroll_thumb2 = hex"#3a3a44",
+}
+
+-- --------------------------------------------------------------------------------
+-- Text drawing helpers
+-- --------------------------------------------------------------------------------
+
+-- draw_text(x,y, fg, s, face, max_cells, bg?)
+-- If bg is provided, it draws per-cell draw.rect behind every glyph cell drawn.
+-- That means text naturally "covers" indent guides or other thin decorations.
+local function draw_text(x, y, fg, s, face, max_cells, bg)
+  face = face or 0
+  local cx = x
+  local limit = max_cells or 10^9
+  local drawn = 0
+  for ch in utf8_iter(s) do
+    if drawn >= limit then break end
+    if bg then
+      draw.rect(cx, y, 1, 1, bg)
+    end
+    draw.glyph(cx, y, fg, ch, face)
+    cx = cx + 1
+    drawn = drawn + 1
+  end
+  return drawn
+end
+
+local function hline(x0, y, w, color, ch)
+  ch = ch or "─"
+  for x = x0, x0 + w - 1 do
+    draw.glyph(x, y, color, ch, 0)
+  end
+end
+
+local function vline(x, y0, h, color, ch)
+  ch = ch or "│"
+  for y = y0, y0 + h - 1 do
+    draw.glyph(x, y, color, ch, 0)
+  end
+end
+
+local function line_no_str(n)
+  return string.format("%4d", n)
+end
+
+-- --------------------------------------------------------------------------------
+-- Content (mock)
+-- --------------------------------------------------------------------------------
+
+-- structured tree: {name, depth, is_dir, is_last}
+local tree = {
+  {"tuicore",   0, true,  true },
+
+  {"src",       1, true,  false},
+  {"main.lua",  2, false, false},
+  {"api_draw.odin", 2, false, false},
+  {"api_window.odin",2,false,false},
+  {"terminal.lua",2,false,true},
+
+  {"docs",      1, true,  false},
+  {"spec.md",   2, false, false},
+  {"notes.md",  2, false, true},
+
+  {"assets",    1, true,  false},
+  {"nerdfont.ttf",2,false,true},
+
+  {"README.md", 1, false, true},
+}
+
+local code_lines = {
+  "local function draw_glyph(x, y, fg, ch, face)",
+  "  -- crop to cell to prevent bleed/overlap",
+  "  -- policy: only BASE_CODEPOINTS may use italic/bold",
+  "  if not is_base_codepoint(ch) then face = 0 end",
+  "  return blit(ch, x, y, fg, face)",
+  "end",
+  "",
+  "local function paint_editor()",
+  "  draw_status(\"tuicore\", \"NORMAL\", cursor, diagnostics)",
+  "  draw_tree(tree, selection)",
+  "  draw_doc(buffer, scroll, cursor)",
+  "end",
+  "",
+  "-- UTF-8 note: never byte-slice strings",
+  "for ch in utf8_iter(s) do",
+  "  draw.glyph(cx, y, fg, ch, face)",
+  "end",
+}
+
+local keywords = {
+  ["local"]=true, ["function"]=true, ["end"]=true, ["if"]=true, ["then"]=true,
+  ["for"]=true, ["in"]=true, ["do"]=true, ["return"]=true, ["not"]=true,
+}
+
+local function tokenize(line)
+  local out = {}
+  for tok in line:gmatch("%S+") do out[#out+1] = tok end
+  return out
+end
+
+local function token_fg(tok)
+  if tok:match("^%-%-") then return C.dim end
+  if keywords[tok] then return C.dim end
+  if tok:match("^\"") or tok:match("^'") then return C.accent2 end
+  if tok:match("^%d") then return C.accent2 end
+  if tok:match("^[%a_][%w_]*%(") then return C.accent end
+  if tok:match("^[%p]+$") then return C.dim end
+  return C.text
+end
+
+local code_tokens = {}
+for i=1,#code_lines do
+  code_tokens[i] = tokenize(code_lines[i])
+end
+
+-- --------------------------------------------------------------------------------
+-- Tree rendering (box drawing)
+-- --------------------------------------------------------------------------------
+
+-- Draw a tree row with connectors.
+-- We keep it simple: this is a mock; we don't compute perfect trunk continuity,
+-- but it looks like a file tree.
+local function draw_tree_row(x0, y, w, node, selected)
+  if selected then
+    draw.rect(x0, y, w, 1, C.hl_tree)
+  end
+
+  local name, depth, is_dir, is_last = node[1], node[2], node[3], node[4]
+  local cx = x0 + 1
+
+  -- connectors: each depth uses 2 cols
+  -- (This is intentionally rough: always show ancestor trunks.)
+  for d=0, depth-1 do
+    draw.glyph(cx, y, C.dim2, "│", 0)
+    cx = cx + 2
+  end
+
+  if depth > 0 then
+    draw.glyph(cx, y, C.dim2, is_last and "└" or "├", 0)
+    draw.glyph(cx+1, y, C.dim2, "─", 0)
+    cx = cx + 2
+  end
+
+  if is_dir then
+    draw.glyph(cx, y, C.accent, "▸", 0)
+    cx = cx + 2
+  else
+    draw.glyph(cx, y, C.dim, "·", 0)
+    cx = cx + 2
+  end
+
+  draw_text(cx, y, selected and C.accent or C.text, name, 0, (x0 + w - 1) - cx, nil)
+end
+
+-- --------------------------------------------------------------------------------
+-- Entry points
+-- --------------------------------------------------------------------------------
+
+function init_terminal()
+  window.init(1280, 720, "tuicore", { "resizable", "vsync_on" })
+  window.set_fps_limit(60)
+  t = 0
+end
+
+function update_terminal(dt)
+  t = t + (dt or 0)
+end
+
+function draw_terminal()
+  local cols = TERM_COLS or 0
+  local rows = TERM_ROWS or 0
+  if cols <= 0 or rows <= 0 then return end
+
+  -- layout
+  local top_h    = 2
+  local status_h = 1
+
+  local top_div_y    = top_h
+  local bottom_div_y = rows - status_h - 1
+
+  local content_y0 = top_div_y + 1
+  local content_y1 = bottom_div_y
+  local content_h  = content_y1 - content_y0
+
+  local tree_w   = clamp(math.floor(cols * 0.26), 18, 34)
+  local gutter_w = 6
+
+  local tree_x0 = 0
+  local tree_x1 = tree_w
+  local tree_div_x = tree_x1
+
+  local doc_x0 = tree_div_x + 1
+  local doc_x1 = cols
+  local doc_w  = doc_x1 - doc_x0
+
+  local gutter_x0 = doc_x0
+  local gutter_x1 = gutter_x0 + gutter_w
+  local gutter_div_x = gutter_x1
+
+  local code_x0 = gutter_div_x + 1
+  local code_w  = doc_x1 - code_x0
+
+  -- clear
+  draw.clear(C.bg)
+
+  -- panel fills
+  draw.rect(0, content_y0, tree_w, content_h, C.panel_tree)
+  draw.rect(doc_x0, content_y0, doc_w, content_h, C.panel_doc)
+  draw.rect(gutter_x0, content_y0, gutter_w, content_h, C.panel_gutter)
+
+  -- status bar fill
+  draw.rect(0, rows-1, cols, 1, C.status_bg)
+
+  -- top bar chips / title
+  draw.rect(0, 0, cols, 1, C.chip_bg)
+  draw_text(2, 0, C.accent, "tuicore", 1)
+  draw_text(11, 0, C.dim, "draw api testbed", 0)
+  draw_text(cols-24, 0, C.dim, "CTRL+P  Find File", 0)
+
+  -- tabs row
+  draw.rect(0, 1, cols, 1, C.status_bg2)
+  draw_text(2, 1, C.text, "[main.lua]", 0)
+  draw_text(13, 1, C.dim, "[api_draw.odin] [terminal.lua]", 0)
+
+  -- tree header
+  draw_text(2, content_y0, C.ln_hot, "PROJECT", 0, tree_w-3, nil)
+
+  -- tree rows
+  local tree_scroll = math.floor((math.sin(t*0.6)*0.5+0.5) * 2)
+  local tree_sel = 4
+
+  for i=1, #tree do
+    local y = content_y0 + 2 + (i-1) - tree_scroll
+    if y >= content_y0+1 and y < content_y1 then
+      draw_tree_row(tree_x0, y, tree_w, tree[i], i == tree_sel)
+    end
+  end
+
+  -- doc header
+  draw_text(doc_x0+2, content_y0, C.ln_hot, "main.lua", 0, doc_w-4, nil)
+
+  -- cursor / scrolling
+  local scroll = math.floor((t*6) % 100000)
+  local first_line = scroll
+  local cursor_row = math.floor((content_h-2) * 0.45)
+  local cursor_line = first_line + cursor_row + 1
+  local cursor_col  = 16 + math.floor((math.sin(t*2.0)*0.5+0.5) * 18)
+
+  local hl_y = content_y0 + 1 + cursor_row
+  draw.rect(doc_x0, hl_y, doc_w, 1, C.hl_row)
+
+  -- indent guide columns (aligned)
+  -- indent step = 2 cells; draw 3 guides at levels 1..3
+  local indent_step = 2
+  local guide_x = {
+    code_x0 + 1 + indent_step*1,
+    code_x0 + 1 + indent_step*2,
+    code_x0 + 1 + indent_step*3,
+  }
+
+  for i=1,3 do
+    if guide_x[i] < doc_x1-1 then
+      vline(guide_x[i], content_y0+1, content_h-1, (i==2) and C.guide_hot or C.guide, "│")
+    end
+  end
+
+  -- code rows
+  local visible_rows = content_h - 1
+  for row=0, visible_rows-1 do
+    local y = content_y0 + 1 + row
+    if y >= content_y1 then break end
+
+    local line_no = first_line + row + 1
+    local ln = line_no_str(line_no)
+    local ln_col = (line_no == cursor_line) and C.ln_hot or C.ln
+
+    -- line number text: give it a bg so it stays clean
+    draw_text(gutter_x0, y, ln_col, ln, 0, gutter_w, C.panel_gutter)
+
+    -- gutter divider: use a rect column instead of glyph so it never misaligns
+    draw.rect(gutter_div_x, y, 1, 1, C.divider_soft)
+
+    -- tokens
+    local toks = code_tokens[(line_no % #code_tokens) + 1]
+    local x = code_x0 + 1
+
+    for _,tok in ipairs(toks) do
+      local fg = token_fg(tok)
+
+      -- token background: THIS is what makes guides disappear behind text.
+      -- we draw per-glyph background inside draw_text (bg = panel_doc).
+      local remaining = (doc_x1 - 1) - x
+      if remaining <= 0 then break end
+
+      local drew = draw_text(x, y, fg, tok, 0, remaining, C.panel_doc)
+      x = x + drew
+
+      if x >= doc_x1-1 then break end
+      -- space separator; also paint bg so guides don't leak through between tokens
+      draw.rect(x, y, 1, 1, C.panel_doc)
+      draw.glyph(x, y, C.text, " ", 0)
+      x = x + 1
+    end
+
+    -- sprinkle fake diagnostics
+    if (line_no % 19) == 0 then
+      draw_text(doc_x1-18, y, C.warn, "unused var", 0, nil, C.panel_doc)
+    elseif (line_no % 23) == 0 then
+      draw_text(doc_x1-20, y, C.warn, "type mismatch", 0, nil, C.panel_doc)
+    end
+  end
+
+  -- selection: make it a tinted band, not black
+  local sel_y = hl_y
+  local sel_x0 = code_x0 + 10
+  local sel_w  = 18
+  draw.rect(sel_x0, sel_y, sel_w, 1, C.sel_bg)
+
+  -- caret (blink) drawn last
+  local blink = (math.floor(t*2) % 2) == 0
+  if blink then
+    local cx = code_x0 + cursor_col
+    local cy = hl_y
+    draw.glyph(cx, cy, C.text, "█", 0)
+  end
+
+  -- scrollbar (doc)
+  local sb_x = doc_x1 - 1
+  draw.rect(sb_x, content_y0+1, 1, content_h-1, C.scroll_track)
+  local thumb_h = clamp(math.floor((content_h-1) * 0.25), 3, content_h-1)
+  local thumb_y = content_y0 + 1 + math.floor((math.sin(t*0.6)*0.5+0.5) * ((content_h-1) - thumb_h))
+  draw.rect(sb_x, thumb_y, 1, thumb_h, C.scroll_thumb)
+
+  -- status bar
+  local status_y = rows - 1
+  draw_text(2, status_y, C.accent, "tuicore", 1)
+  draw_text(11, status_y, C.dim, "NORMAL", 0)
+  local pos = string.format("Ln %d, Col %d", cursor_line, cursor_col)
+  draw_text(cols-#pos-2, status_y, C.text, pos, 0)
+
+  -- dividers LAST
+  hline(0, top_div_y, cols, C.divider, "─")
+  hline(0, bottom_div_y, cols, C.divider, "─")
+  vline(tree_div_x, content_y0, content_h, C.divider, "│")
+end
+

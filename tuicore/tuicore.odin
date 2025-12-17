@@ -114,11 +114,24 @@ update_lua_globals :: proc(L: ^lua.State) {
 	lua.setglobal(L, cstring("TERM_ROWS"))
 }
 
+push_lua_module :: proc(L: ^lua.State, module_name: cstring) {
+	// Stack on entry: [module_table]
+
+	lua.getglobal(L, cstring("package"))         // [module_table, package]
+	lua.getfield(L, -1, cstring("loaded"))       // [module_table, package, loaded]
+
+	lua.pushvalue(L, -3)                         // [module_table, package, loaded, module_table]
+	lua.setfield(L, -2, module_name)             // loaded[module_name] = module_table (pops copy)
+
+	lua.pop(L, 3)                                // pop loaded, package, module_table -> []
+}
+
 // register_lua_api registers Lua tables/functions (no size-dependent globals).
 // Call update_lua_globals(L) after the window + Cell_W/Cell_H are ready.
 register_lua_api :: proc(L: ^lua.State) {
 	register_draw_api(L)
 	register_window_api(L)
+	register_input_api(L)
 }
 
 // -----------------------------------------------------------------------------
@@ -258,6 +271,10 @@ main :: proc() {
 
 	register_lua_api(L)
 
+	rl.SetTraceLogLevel(rl.TraceLogLevel.ERROR)
+
+
+
 	exe_dir := filepath.dir(os.args[0])
 	main_path, err := filepath.join([]string{exe_dir, "main.lua"})
 	if err != nil {
@@ -278,6 +295,7 @@ main :: proc() {
 	if !call_lua_noargs(L, cstring("init_terminal")) {
 		return
 	}
+	defer rl.CloseWindow()
 
 	// -------------------------------------------------------------------------
 	// Font + cell metrics (needs window)
@@ -304,38 +322,30 @@ main :: proc() {
 	// Main loop
 	// -------------------------------------------------------------------------
 	for !rl.WindowShouldClose() {
-		frame_start_s := rl.GetTime()
 
 		if rl.IsWindowResized() {
 			update_lua_globals(L)
 		}
 
-		dt_s := cast(f64)(rl.GetFrameTime()) // last-frame delta (seconds)
+		// last-frame delta (seconds)
+		dt_s := cast(f64)(rl.GetFrameTime())
+
+		// refresh per-frame input caches (typed text)
+		input_begin_frame()
 
 		// --- Lua update ---
-		update_start_s := rl.GetTime()
-		ok_upd := call_lua_number(L, cstring("update_terminal"), dt_s)
-		update_end_s := rl.GetTime()
-		update_s := update_end_s - update_start_s
-		if !ok_upd {
+		if !call_lua_number(L, cstring("update_terminal"), dt_s) {
 			break
 		}
 
-		// --- Lua draw (CPU time spent in draw_terminal + draw.* callbacks) ---
+		// --- Lua draw ---
 		rl.BeginDrawing()
-		draw_start_s := rl.GetTime()
-		ok_draw := call_lua_noargs(L, cstring("draw_terminal"))
-		draw_end_s := rl.GetTime()
-		rl.EndDrawing()
-		draw_s := draw_end_s - draw_start_s
-		if !ok_draw {
+		if !call_lua_noargs(L, cstring("draw_terminal")) {
+			rl.EndDrawing()
 			break
 		}
-
-		frame_end_s := rl.GetTime()
-		frame_s := frame_end_s - frame_start_s
-
-		update_perf_test(frame_s, update_s, draw_s)
+		rl.EndDrawing()
 	}
 }
+
 

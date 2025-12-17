@@ -7,12 +7,12 @@ package main
 // Intent:
 // - Flat, direct mapping to raylib window/cursor calls.
 // - No extra state tracked in the engine (mode is derived from raylib state).
-// - Fail-fast on wrong argument types (Lua checks); unknown flag/mode tokens are ignored for now.
+// - Fail-fast on wrong argument types (Lua checks); unknown flag/mode tokens raise Lua errors.
 //
 // opts (init) is a flat array of strings:
 //   window.init(w, h, title, { "vsync_on", "resizable", ... })
 //
-// Supported opts tokens (others ignored):
+// Supported opts tokens (others are errors):
 // - "vsync_on"            -> VSYNC_HINT
 // - "fullscreen_mode"     -> FULLSCREEN_MODE
 // - "resizable"           -> WINDOW_RESIZABLE
@@ -27,7 +27,7 @@ package main
 
 import "core:c"
 import "core:strings"
-
+import "base:runtime"
 import lua "luajit"
 import rl  "vendor:raylib"
 
@@ -72,7 +72,7 @@ register_window_api :: proc(L: ^lua.State) {
 	lua.pushcfunction(L, lua_window_is_cursor_hidden)    ; lua.setfield(L, -2, cstring("is_cursor_hidden"))
 	lua.pushcfunction(L, lua_window_is_cursor_on_screen) ; lua.setfield(L, -2, cstring("is_cursor_on_screen"))
 
-	lua.setglobal(L, cstring("window"))
+	push_lua_module(L, cstring("tuicore.window"))
 }
 
 // -----------------------------------------------------------------------------
@@ -82,6 +82,7 @@ register_window_api :: proc(L: ^lua.State) {
 // window_config_flags_from_opts converts a Lua opts table into raylib ConfigFlags.
 // Table shape: { "vsync_on", "resizable", ... } (1-based array part).
 window_config_flags_from_opts :: proc "contextless" (L: ^lua.State, idx: c.int) -> rl.ConfigFlags {
+	context = runtime.default_context()
 	flags := rl.ConfigFlags{}
 	tidx := lua.Index(idx)
 
@@ -95,10 +96,9 @@ window_config_flags_from_opts :: proc "contextless" (L: ^lua.State, idx: c.int) 
 		p := lua.L_checklstring(L, -1, &len)
 
 		// Non-alloc string view for comparisons.
-		// (Tokens here are simple ASCII option names; embedded '\0' is not expected.)
-		opt := strings.string_from_null_terminated_ptr(cast([^]u8) p, int(len))
+		opt  := strings.string_from_ptr(cast(^u8) p, int(len))
 
-		// Style A strings (exactly as per your spec)
+
 		if opt == "vsync_on" {
 			flags |= rl.ConfigFlags{.VSYNC_HINT}
 		} else if opt == "fullscreen_mode" {
@@ -121,6 +121,9 @@ window_config_flags_from_opts :: proc "contextless" (L: ^lua.State, idx: c.int) 
 			flags |= rl.ConfigFlags{.WINDOW_MOUSE_PASSTHROUGH}
 		} else if opt == "borderless_windowed" {
 			flags |= rl.ConfigFlags{.BORDERLESS_WINDOWED_MODE}
+		} else {
+			// fail-fast on typos
+			lua.L_error(L, cstring("window.init: unknown opt '%.*s'"), int(len), p)
 		}
 
 		lua.pop(L, 1)
@@ -208,7 +211,7 @@ lua_window_set_fps_limit :: proc "c" (L: ^lua.State) -> c.int {
 
 // window.set_vsync(bool) -> Set/Clear VSYNC_HINT window state.
 lua_window_set_vsync :: proc "c" (L: ^lua.State) -> c.int {
-	enable := lua.toboolean(L, 1) != b32(0)
+	enable := lua.toboolean(L, 1) 
 	if enable {
 		rl.SetWindowState(rl.ConfigFlags{.VSYNC_HINT})
 	} else {
@@ -219,7 +222,7 @@ lua_window_set_vsync :: proc "c" (L: ^lua.State) -> c.int {
 
 // window.set_resizable(bool) -> Set/Clear WINDOW_RESIZABLE window state.
 lua_window_set_resizable :: proc "c" (L: ^lua.State) -> c.int {
-	enable := lua.toboolean(L, 1) != b32(0)
+	enable := lua.toboolean(L, 1) 
 	if enable {
 		rl.SetWindowState(rl.ConfigFlags{.WINDOW_RESIZABLE})
 	} else {
@@ -230,18 +233,19 @@ lua_window_set_resizable :: proc "c" (L: ^lua.State) -> c.int {
 
 // window.set_mode(mode) -> sets exactly one of: "windowed" | "fullscreen" | "borderless_windowed".
 lua_window_set_mode :: proc "c" (L: ^lua.State) -> c.int {
+	context = runtime.default_context()
 	mode_len: c.size_t
 	mode_c := lua.L_checklstring(L, 1, &mode_len)
 
 	// Non-alloc view for mode token comparisons.
-	mode := strings.string_from_null_terminated_ptr(cast([^]u8) mode_c, int(mode_len))
+	mode := strings.string_from_ptr(cast(^u8) mode_c, int(mode_len))
 
 	want_windowed   := mode == "windowed"
 	want_fullscreen := mode == "fullscreen"
 	want_borderless := mode == "borderless_windowed"
 
 	if !want_windowed && !want_fullscreen && !want_borderless {
-		return 0
+		return lua.L_error(L, cstring("window.set_mode: unknown mode '%.*s'"), int(mode_len), mode_c)
 	}
 
 	is_fullscreen := rl.IsWindowFullscreen()
@@ -267,7 +271,7 @@ lua_window_set_mode :: proc "c" (L: ^lua.State) -> c.int {
 
 // window.set_undecorated(bool) -> Set/Clear WINDOW_UNDECORATED window state.
 lua_window_set_undecorated :: proc "c" (L: ^lua.State) -> c.int {
-	enable := lua.toboolean(L, 1) != b32(0)
+	enable := lua.toboolean(L, 1) 
 	if enable {
 		rl.SetWindowState(rl.ConfigFlags{.WINDOW_UNDECORATED})
 	} else {
@@ -278,7 +282,7 @@ lua_window_set_undecorated :: proc "c" (L: ^lua.State) -> c.int {
 
 // window.set_cursor_hidden(bool) -> HideCursor/ShowCursor.
 lua_window_set_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
-	hide := lua.toboolean(L, 1) != b32(0)
+	hide := lua.toboolean(L, 1) 
 	if hide {
 		rl.HideCursor()
 	} else {
@@ -359,3 +363,4 @@ lua_window_is_cursor_on_screen :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushboolean(L, b32(rl.IsCursorOnScreen()))
 	return 1
 }
+
