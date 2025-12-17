@@ -118,18 +118,6 @@ write_ranges :: proc "contextless" (out: []rune, ranges: []Codepoint_Range) -> i
 // Lua globals + API binding
 // -----------------------------------------------------------------------------
 
-// update_lua_globals updates Lua globals that depend on render size.
-update_lua_globals :: proc(L: ^lua.State) {
-	render_w := cast(i32)(rl.GetRenderWidth())
-	render_h := cast(i32)(rl.GetRenderHeight())
-
-	// Invariant: Cell_W/Cell_H are > 0 by construction (set during init).
-	lua.pushinteger(L, cast(lua.Integer)(render_w / Cell_W))
-	lua.setglobal(L, cstring("TERM_COLS"))
-
-	lua.pushinteger(L, cast(lua.Integer)(render_h / Cell_H))
-	lua.setglobal(L, cstring("TERM_ROWS"))
-}
 
 push_lua_module :: proc(L: ^lua.State, module_name: cstring) {
 	// Stack on entry: [module_table]
@@ -265,7 +253,6 @@ rebuild_fonts :: proc(L: ^lua.State) {
 	compute_cell_metrics()
 	Fonts_Loaded = true
 
-	update_lua_globals(L)
 }
 
 ensure_fonts_loaded :: proc(L: ^lua.State) {
@@ -399,9 +386,6 @@ main :: proc() {
 	// -------------------------------------------------------------------------
 	for !rl.WindowShouldClose() {
 
-		if rl.IsWindowResized() {
-			update_lua_globals(L)
-		}
 
 		// last-frame delta (seconds)
 		dt_s := cast(f64)(rl.GetFrameTime())

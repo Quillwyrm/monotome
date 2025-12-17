@@ -75,6 +75,11 @@ read_rgba_table :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> rl.Colo
 	return rl.Color{r, g, b, a}
 }
 
+// Returns the drawable grid size (in CELLS), derived from render size.
+grid_cols_rows :: proc "contextless" () -> (cols, rows: i32) {
+	return cast(i32)(rl.GetRenderWidth()) / Cell_W,
+	       cast(i32)(rl.GetRenderHeight()) / Cell_H
+}
 
 // -----------------------------------------------------------------------------
 // Host draw primitive (shared core)
@@ -82,7 +87,13 @@ read_rgba_table :: proc "contextless" (L: ^lua.State, idx: lua.Index) -> rl.Colo
 
 // draw_glyph draws exactly one codepoint into a single cell at (x,y) using face.
 // Includes █ special-case and cell-clip logic.
+// NOW ALSO enforces: nothing draws outside the cell grid.
 draw_glyph :: proc "contextless" (x, y: i32, color: rl.Color, codepoint: rune, face: i32) {
+	cols, rows := grid_cols_rows()
+	if x < 0 || y < 0 || x >= cols || y >= rows {
+		return
+	}
+
 	// █ => filled cell (perfect, avoids raster seams).
 	if codepoint == rune(0x2588) {
 		rl.DrawRectangle(x * Cell_W, y * Cell_H, Cell_W, Cell_H, color)
@@ -136,6 +147,7 @@ draw_glyph :: proc "contextless" (x, y: i32, color: rl.Color, codepoint: rune, f
 }
 
 
+
 // -----------------------------------------------------------------------------
 // Lua API
 // -----------------------------------------------------------------------------
@@ -150,10 +162,17 @@ lua_draw_clear :: proc "c" (L: ^lua.State) -> c.int {
 
 // draw.cell(x, y, {r,g,b,a})
 // Fills a cell rectangle (cell coords, not pixels).
+// draw.cell(x, y, {r,g,b,a})
+// Fills a cell rectangle (cell coords, not pixels).
 lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 	x := cast(i32)(lua.L_checkinteger(L, 1))
 	y := cast(i32)(lua.L_checkinteger(L, 2))
 	color := read_rgba_table(L, 3)
+
+	cols, rows := grid_cols_rows()
+	if x < 0 || y < 0 || x >= cols || y >= rows {
+		return 0
+	}
 
 	rl.DrawRectangle(x * Cell_W, y * Cell_H, Cell_W, Cell_H, color)
 	return 0
@@ -162,6 +181,7 @@ lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 
 // draw.rect(x, y, w, h, {r,g,b,a})
 // Draws a filled rectangle in *cell space* (converted to pixels internally).
+// NOW clamps in cell space to the drawable grid.
 lua_draw_rect :: proc "c" (L: ^lua.State) -> c.int {
 	x := cast(i32)(lua.L_checkinteger(L, 1))
 	y := cast(i32)(lua.L_checkinteger(L, 2))
@@ -169,7 +189,23 @@ lua_draw_rect :: proc "c" (L: ^lua.State) -> c.int {
 	h := cast(i32)(lua.L_checkinteger(L, 4))
 	color := read_rgba_table(L, 5)
 
-	rl.DrawRectangle(x * Cell_W, y * Cell_H, w * Cell_W, h * Cell_H, color)
+	cols, rows := grid_cols_rows()
+
+	x0 := x
+	y0 := y
+	x1 := x + w
+	y1 := y + h
+
+	if x0 < 0    { x0 = 0 }
+	if y0 < 0    { y0 = 0 }
+	if x1 > cols { x1 = cols }
+	if y1 > rows { y1 = rows }
+
+	if x0 >= x1 || y0 >= y1 {
+		return 0
+	}
+
+	rl.DrawRectangle(x0 * Cell_W, y0 * Cell_H, (x1 - x0) * Cell_W, (y1 - y0) * Cell_H, color)
 	return 0
 }
 
