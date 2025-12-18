@@ -57,10 +57,12 @@ register_window_api :: proc(L: ^lua.State) {
 	lua.pushcfunction(L, lua_window_set_resizable)     ; lua.setfield(L, -2, cstring("set_resizable"))
 	lua.pushcfunction(L, lua_window_set_mode)          ; lua.setfield(L, -2, cstring("set_mode"))
 	lua.pushcfunction(L, lua_window_set_undecorated)   ; lua.setfield(L, -2, cstring("set_undecorated"))
+	lua.pushcfunction(L, lua_window_set_mouse_cursor) ; lua.setfield(L, -2, cstring("set_mouse_cursor"))
 	lua.pushcfunction(L, lua_window_set_cursor_hidden) ; lua.setfield(L, -2, cstring("set_cursor_hidden"))
+	
 
 	// info
-	lua.pushcfunction(L, lua_window_pixel_size) ; lua.setfield(L, -2, cstring("pixel_size"))
+	lua.pushcfunction(L, lua_window_render_size) ; lua.setfield(L, -2, cstring("render_size"))
 	lua.pushcfunction(L, lua_window_position)   ; lua.setfield(L, -2, cstring("position"))
 	lua.pushcfunction(L, lua_window_monitor)    ; lua.setfield(L, -2, cstring("monitor"))
 	lua.pushcfunction(L, lua_window_mode)       ; lua.setfield(L, -2, cstring("mode"))
@@ -78,6 +80,11 @@ register_window_api :: proc(L: ^lua.State) {
 	lua.pushcfunction(L, lua_window_is_maximized)        ; lua.setfield(L, -2, cstring("is_maximized"))
 	lua.pushcfunction(L, lua_window_is_cursor_hidden)    ; lua.setfield(L, -2, cstring("is_cursor_hidden"))
 	lua.pushcfunction(L, lua_window_is_cursor_on_screen) ; lua.setfield(L, -2, cstring("is_cursor_on_screen"))
+	lua.pushcfunction(L, lua_window_should_close) ; lua.setfield(L, -2, cstring("should_close"))
+
+	// clipboard
+	lua.pushcfunction(L, lua_window_get_clipboard) ; lua.setfield(L, -2, cstring("get_clipboard"))
+	lua.pushcfunction(L, lua_window_set_clipboard) ; lua.setfield(L, -2, cstring("set_clipboard"))
 
 	push_lua_module(L, cstring("tuicore.window"))
 }
@@ -287,6 +294,54 @@ lua_window_set_undecorated :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_mouse_cursor(tok)
+// tok is lowercase string, one of:
+// "default" | "arrow" | "ibeam" | "crosshair" | "pointing_hand" |
+// "resize_ew" | "resize_ns" | "resize_nwse" | "resize_nesw" | "resize_all" | "not_allowed"
+lua_window_set_mouse_cursor :: proc "c" (L: ^lua.State) -> c.int {
+	context = runtime.default_context()
+
+	n_sz: c.size_t
+	p := lua.L_checklstring(L, 1, &n_sz)
+	n := int(n_sz)
+
+	if n <= 0 {
+		return lua.L_error(L, cstring("window.set_mouse_cursor: empty token"))
+	}
+
+	tok := strings.string_from_ptr(cast(^u8)p, n)
+
+	cursor: rl.MouseCursor
+	if tok == "default" {
+		cursor = .DEFAULT
+	} else if tok == "arrow" {
+		cursor = .ARROW
+	} else if tok == "ibeam" {
+		cursor = .IBEAM
+	} else if tok == "crosshair" {
+		cursor = .CROSSHAIR
+	} else if tok == "pointing_hand" {
+		cursor = .POINTING_HAND
+	} else if tok == "resize_ew" {
+		cursor = .RESIZE_EW
+	} else if tok == "resize_ns" {
+		cursor = .RESIZE_NS
+	} else if tok == "resize_nwse" {
+		cursor = .RESIZE_NWSE
+	} else if tok == "resize_nesw" {
+		cursor = .RESIZE_NESW
+	} else if tok == "resize_all" {
+		cursor = .RESIZE_ALL
+	} else if tok == "not_allowed" {
+		cursor = .NOT_ALLOWED
+	} else {
+		return lua.L_error(L, cstring("window.set_mouse_cursor: unknown cursor '%.*s'"), n, p)
+	}
+
+	rl.SetMouseCursor(cursor)
+	return 0
+}
+
 // window.set_cursor_hidden(bool) -> HideCursor/ShowCursor.
 lua_window_set_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
 	hide := lua.toboolean(L, 1) 
@@ -298,14 +353,33 @@ lua_window_set_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+// window.set_clipboard(text) -> (raylib SetClipboardText)
+lua_window_set_clipboard :: proc "c" (L: ^lua.State) -> c.int {
+	text := lua.L_checklstring(L, 1, nil)
+	rl.SetClipboardText(text)
+	return 0
+}
+
+
+// window.get_clipboard() -> string (raylib GetClipboardText)
+lua_window_get_clipboard :: proc "c" (L: ^lua.State) -> c.int {
+	p := rl.GetClipboardText()
+	if p == nil {
+		lua.pushlstring(L, cstring(""), 0)
+		return 1
+	}
+	lua.pushstring(L, p)
+	return 1
+}
+
 // -----------------------------------------------------------------------------
 // Info
 // -----------------------------------------------------------------------------
 
 // window.pixel_size() -> px_w, px_h (GetScreenWidth/Height).
-lua_window_pixel_size :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushinteger(L, lua.Integer(rl.GetScreenWidth()))
-	lua.pushinteger(L, lua.Integer(rl.GetScreenHeight()))
+lua_window_render_size :: proc "c" (L: ^lua.State) -> c.int {
+	lua.pushinteger(L, lua.Integer(rl.GetRenderWidth()))
+	lua.pushinteger(L, lua.Integer(rl.GetRenderHeight()))
 	return 2
 }
 
@@ -429,6 +503,12 @@ lua_window_is_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
 // window.is_cursor_on_screen() -> IsCursorOnScreen().
 lua_window_is_cursor_on_screen :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushboolean(L, b32(rl.IsCursorOnScreen()))
+	return 1
+}
+
+// window.should_close() -> bool (raylib WindowShouldClose)
+lua_window_should_close :: proc "c" (L: ^lua.State) -> c.int {
+	lua.pushboolean(L, b32(rl.WindowShouldClose()))
 	return 1
 }
 

@@ -45,13 +45,29 @@ local state = {
 
   -- repeat blink phase (toggles on each repeat event)
   key_rep_flip = {},
+
+  -- clipboard test
+  clipboard = "",
+  clipboard_age = 999,
+  clipboard_poll_t = 0,
+  clipboard_msg = "",
+
+  -- cursor test
+  cursor_tok = "arrow",
+  cursor_hidden = false,
+
+  -- ui cache (computed each update)
+  ui = nil,
 }
 
 -- init_terminal sets up a resizable window with vsync.
 function init_terminal()
   window.init(960, 540, "tuicore input test", { "vsync_on", "resizable" })
   window.set_fps_limit(60)
-  window.set_cursor_hidden(true)
+
+  -- cursor needs to be visible to test SetMouseCursor
+  state.cursor_hidden = false
+  window.set_cursor_hidden(false)
 
   font.init(14,{
     "C:/Users/theja/AppData/Local/Microsoft/Windows/Fonts/IosevkaQuillwyrm-Regular.ttf",
@@ -59,6 +75,10 @@ function init_terminal()
     "C:/Users/theja/AppData/Local/Microsoft/Windows/Fonts/IosevkaQuillwyrm-Italic.ttf",
     "C:/Users/theja/AppData/Local/Microsoft/Windows/Fonts/IosevkaQuillwyrm-BoldItalic.ttf"
   })
+
+  -- seed clipboard display (best effort)
+  state.clipboard = window.get_clipboard() or ""
+  state.clipboard_age = 0
 end
 
 -- utf8_pop removes the last UTF-8 codepoint (good enough for typed-buffer editing).
@@ -108,6 +128,10 @@ local function box(x, y, w, h, fill, border)
   draw.rect(x, y + h - 1, w, 1, border)
   draw.rect(x, y, 1, h, border)
   draw.rect(x + w - 1, y, 1, h, border)
+end
+
+local function in_rect(px, py, x, y, w, h)
+  return (px >= x and px < x + w and py >= y and py < y + h)
 end
 
 -- utf8_iter returns an iterator over UTF-8 "characters" (substrings).
@@ -294,10 +318,134 @@ local function layout(cols)
   return panel_w, world_x0, world_x1
 end
 
+local function clamp_buffer(s)
+  if #s > MAX_BUFFER then
+    return string.sub(s, #s - MAX_BUFFER + 1)
+  end
+  return s
+end
+
+local function set_cursor(tok)
+  if state.cursor_hidden then return end
+  if tok == state.cursor_tok then return end
+  state.cursor_tok = tok
+  window.set_mouse_cursor(tok)
+end
+
+-- compute UI rectangles once per update so clicks/cursor logic is deterministic.
+local function compute_ui(cols, rows)
+  local panel_w, world_x0, world_x1 = layout(cols)
+  local world_w = cols - world_x0
+
+  local x = 2
+  local y = 1
+
+  -- INFO block (same as draw)
+  y = y + 1
+  y = y + 1
+  y = y + 2 -- after world line
+
+  local box_x = x
+  local box_w = panel_w - 4
+  if box_w < 0 then box_w = 0 end
+
+  -- CLIPBOARD block
+  local clip_header_y = y
+  local btn_h = 3
+  local btn_gap = 1
+
+  local buttons = {}
+  local function add_button(id, label)
+    local w = #label + 4
+    return { id = id, label = label, w = w, h = btn_h, x = 0, y = 0 }
+  end
+
+  local btn_list = {
+    add_button("copy",   "copy typed"),
+    add_button("paste",  "paste+"),
+    add_button("replace","replace"),
+    add_button("demo",   "demo"),
+    add_button("clear",  "clear"),
+    add_button("cursor", "toggle cursor"),
+    add_button("poll",   "poll now"),
+  }
+
+  local bx = box_x
+  local by = clip_header_y + 1
+
+  for i = 1, #btn_list do
+    local b = btn_list[i]
+    if box_w > 0 and bx + b.w > box_x + box_w then
+      bx = box_x
+      by = by + btn_h + btn_gap
+    end
+    b.x, b.y = bx, by
+    buttons[#buttons+1] = b
+    bx = bx + b.w + btn_gap
+  end
+
+  local btn_block_bottom = by + btn_h
+  local clip_box_y = btn_block_bottom + 1
+  local clip_h = 6
+
+  local clip_box = { x = box_x, y = clip_box_y, w = box_w, h = clip_h }
+
+  local after_clip_y = clip_box_y + clip_h + 1
+
+  -- INPUT section starts after clipboard area
+  local input_y0 = after_clip_y
+
+  -- later: boxed text areas use remaining space
+  local last_h = 5
+  local buf_h  = math.max(7, rows - (input_y0 + 2) - 3)
+
+  -- we match draw’s later placement:
+  -- input uses a variable amount; we can’t precompute typed box without redoing all those y increments
+  -- so we compute it in draw and also for cursor we treat "typed buffer box" via the same math in draw.
+
+  return {
+    panel_w = panel_w,
+    world_x0 = world_x0,
+    world_x1 = world_x1,
+    world_w = world_w,
+
+    box_x = box_x,
+    box_w = box_w,
+
+    clip_header_y = clip_header_y,
+    buttons = buttons,
+    clip_box = clip_box,
+    input_y0 = input_y0,
+
+    last_h = last_h,
+    buf_h = buf_h,
+  }
+end
+
+local function find_button(ui, mx, my)
+  for i = 1, #ui.buttons do
+    local b = ui.buttons[i]
+    if in_rect(mx, my, b.x, b.y, b.w, b.h) then
+      return b
+    end
+  end
+  return nil
+end
+
+local function clipboard_set(s, msg)
+  window.set_clipboard(s)
+  state.clipboard = s
+  state.clipboard_age = 0
+  state.clipboard_poll_t = 0
+  state.clipboard_msg = msg or ""
+end
+
 -- update_terminal advances the demo + captures input state for rendering.
 function update_terminal(dt)
   local cols, rows = window.grid_size()
   if cols <= 0 or rows <= 0 then return end
+
+  state.ui = compute_ui(cols, rows)
 
   state.t = state.t + dt
 
@@ -308,16 +456,26 @@ function update_terminal(dt)
   tick_pulses(dt, state.mouse_p)
   tick_pulses(dt, state.mouse_r)
 
+  -- clipboard polling (so you can alt-tab and copy elsewhere)
+  state.clipboard_poll_t = state.clipboard_poll_t + dt
+  state.clipboard_age = state.clipboard_age + dt
+  if state.clipboard_poll_t >= 0.25 then
+    state.clipboard_poll_t = 0
+    local s = window.get_clipboard() or ""
+    if s ~= state.clipboard then
+      state.clipboard = s
+      state.clipboard_age = 0
+      state.clipboard_msg = "clipboard changed externally"
+    end
+  end
+
   -- typed text this frame (host must call input_begin_frame() before this)
   local s = input.get_text()
   if s ~= "" then
     state.last_input = s
     state.last_input_age = 0
 
-    state.typed = state.typed .. s
-    if #state.typed > MAX_BUFFER then
-      state.typed = string.sub(state.typed, #state.typed - MAX_BUFFER + 1)
-    end
+    state.typed = clamp_buffer(state.typed .. s)
   else
     state.last_input_age = state.last_input_age + dt
   end
@@ -339,7 +497,7 @@ function update_terminal(dt)
     state.typed = utf8_pop(state.typed)
   end
 
-  local panel_w, world_x0, world_x1 = layout(cols)
+  local panel_w, world_x0, world_x1 = state.ui.panel_w, state.ui.world_x0, state.ui.world_x1
 
   -- initial placement (only once)
   if state.px == 0 and state.py == 0 then
@@ -368,8 +526,8 @@ function update_terminal(dt)
     if input.mouse_released(b) then pulse(state.mouse_r, b, EDGE_HOLD_S) end
   end
 
-  -- teleport @ on left click (cell-space)
-  if input.mouse_pressed("left") then
+  -- teleport @ on left click (cell-space) if you click in world (not panel)
+  if input.mouse_pressed("left") and mx >= world_x0 then
     state.px = clamp(mx, world_x0, world_x1)
     state.py = clamp(my, 0, rows - 1)
   end
@@ -380,6 +538,67 @@ function update_terminal(dt)
     state.wheel_x = state.wheel_x + wx
     state.wheel_y = state.wheel_y + wy
   end
+
+  -- ---------------------------------------------------------------------------
+  -- Clipboard button actions + cursor testing
+  -- ---------------------------------------------------------------------------
+  local ui = state.ui
+  local hovered_btn = find_button(ui, mx, my)
+
+  -- divider cursor test
+  if mx == ui.panel_w then
+    set_cursor("resize_ew")
+  elseif hovered_btn then
+    set_cursor("pointing_hand")
+  elseif ui.clip_box.w > 0 and in_rect(mx, my, ui.clip_box.x, ui.clip_box.y, ui.clip_box.w, ui.clip_box.h) then
+    set_cursor("ibeam")
+  elseif mx >= ui.world_x0 then
+    set_cursor("crosshair")
+  else
+    set_cursor("arrow")
+  end
+
+  if input.mouse_pressed("left") and hovered_btn then
+    if hovered_btn.id == "copy" then
+      clipboard_set(state.typed, "copied typed -> clipboard")
+    elseif hovered_btn.id == "paste" then
+      state.typed = clamp_buffer(state.typed .. (state.clipboard or ""))
+      state.clipboard_msg = "pasted clipboard -> typed (append)"
+    elseif hovered_btn.id == "replace" then
+      state.typed = clamp_buffer(state.clipboard or "")
+      state.clipboard_msg = "pasted clipboard -> typed (replace)"
+    elseif hovered_btn.id == "demo" then
+      clipboard_set("tuicore clipboard test\nline 2\nunicode: Ω≈ç√∫˜µ≤≥÷  🙂", "set demo clipboard text")
+    elseif hovered_btn.id == "clear" then
+      clipboard_set("", "cleared clipboard")
+    elseif hovered_btn.id == "cursor" then
+      state.cursor_hidden = not state.cursor_hidden
+      window.set_cursor_hidden(state.cursor_hidden)
+      state.clipboard_msg = state.cursor_hidden and "cursor hidden (cannot see cursor shapes)" or "cursor visible"
+      if not state.cursor_hidden then
+        -- force an immediate update next frame
+        state.cursor_tok = ""
+      end
+    elseif hovered_btn.id == "poll" then
+      local s = window.get_clipboard() or ""
+      state.clipboard = s
+      state.clipboard_age = 0
+      state.clipboard_poll_t = 0
+      state.clipboard_msg = "polled clipboard now"
+    end
+  end
+end
+
+local function draw_button(b, hover, down, label_override)
+  local label = label_override or b.label
+  local fill = hover and C_PANEL or C_PANEL_2
+  local border = hover and C_ACCENT or C_LINE
+  if down then
+    fill = C_PANEL_2
+    border = C_WARN
+  end
+  box(b.x, b.y, b.w, b.h, fill, border)
+  draw.text(b.x + 2, b.y + 1, label, hover and C_TEXT or C_MUTED)
 end
 
 -- draw_terminal renders the UI + demo world.
@@ -389,7 +608,8 @@ function draw_terminal()
 
   draw.clear(C_BG)
 
-  local panel_w, world_x0, world_x1 = layout(cols)
+  local ui = state.ui or compute_ui(cols, rows)
+  local panel_w, world_x0, world_x1 = ui.panel_w, ui.world_x0, ui.world_x1
   local world_w = cols - world_x0
 
   -- left panel background + divider
@@ -416,11 +636,39 @@ function draw_terminal()
   local x = 2
   local y = 1
 
-  -- INFO header (more room now)
+  -- INFO header
   local cell_w, cell_h = window.cell_size()
   draw.text(x, y, "INFO", C_TEXT) ; y = y + 1
   draw.text(x, y, string.format("grid: %d x %d   cell: %d x %d", cols, rows, cell_w, cell_h), C_MUTED) ; y = y + 1
   draw.text(x, y, string.format("world: x=[%d..%d] (w=%d)", world_x0, world_x1, world_w), C_MUTED) ; y = y + 2
+
+  -- CLIPBOARD section
+  draw.text(x, y, "CLIPBOARD", C_TEXT) ; y = y + 1
+
+  local hovered_btn = ui and find_button(ui, mx, my) or nil
+  local mouse_down = input.mouse_down("left")
+
+  for i = 1, #ui.buttons do
+    local b = ui.buttons[i]
+    local hover = hovered_btn and (hovered_btn.id == b.id)
+    local down = hover and mouse_down
+    local label_override = nil
+    if b.id == "cursor" then
+      label_override = state.cursor_hidden and "show cursor" or "hide cursor"
+    end
+    draw_button(b, hover, down, label_override)
+  end
+
+  local clip_title = string.format("clipboard (%d bytes, %.2fs ago)", #(state.clipboard or ""), state.clipboard_age)
+  if state.clipboard_msg ~= "" then
+    clip_title = clip_title .. "  -  " .. state.clipboard_msg
+  end
+  if ui.clip_box.w > 0 then
+    draw_boxed_text(ui.clip_box.x, ui.clip_box.y, ui.clip_box.w, ui.clip_box.h, clip_title, (state.clipboard ~= "" and state.clipboard or "<empty>"), C_MUTED, C_TEXT)
+  end
+
+  -- continue layout after clipboard region
+  y = ui.input_y0
 
   draw.text(x, y, "INPUT", C_TEXT) ; y = y + 2
 
@@ -461,6 +709,8 @@ function draw_terminal()
     draw.text(world_x0, 0, "WORLD", C_TEXT)
     draw.text(world_x0, 1, "WASD move", C_MUTED)
     draw.text(world_x0, 2, "LMB tp", C_MUTED)
+    draw.text(world_x0, 3, "hover->cursor: crosshair", C_MUTED)
+    draw.text(world_x0, rows - 2, "panel divider->resize_ew", C_MUTED)
     draw.text(world_x0, rows - 1, string.format("wheel: %.1f,%.1f", state.wheel_x, state.wheel_y), C_MUTED)
   end
 end
