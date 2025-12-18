@@ -1,6 +1,6 @@
-![runeslate](logo.png)
+![monotome](logo.png)
 
-**Runeslate** is a **Lua-scriptable textmode rendering engine** written in *Odin*, built on *raylib*.
+**Monotome** is a **Lua-scriptable textmode rendering engine** written in *Odin*, built on *raylib*.
 
 **Write Lua, draw glyphs, ship little tools.**
 
