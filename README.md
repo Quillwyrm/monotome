@@ -1,7 +1,6 @@
 ![runeslate](logo.png)
-# RuneSlate
 
-RuneSlate is a **Lua-scriptable textmode rendering engine** written in **Odin**, built on **raylib**.
+**Runeslate** is a **Lua-scriptable textmode rendering engine** written in *Odin*, built on *raylib*.
 
 **Write Lua, draw glyphs, ship little tools.**
 
