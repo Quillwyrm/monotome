@@ -1,16 +1,19 @@
 package main
 
-// tuicore — prototype terminal grid renderer driven by Lua.
+// monotome — Lua-scriptable cell-space renderer (textmode look) backed by raylib.
 // Lua must define: init_terminal(), update_terminal(dt), draw_terminal().
 //
-// Exposes to Lua:
-// - draw.clear(rgba), draw.cell(x,y,rgba), draw.glyph(x,y,rgba,text,face)
-// - window.* (see api_window.odin)
-// - globals: TERM_COLS, TERM_ROWS
+// Exposes to Lua modules:
+// - draw:   clear, cell, rect, glyph, text
+// - window: init/config + metrics (render_size, cell_size, grid_size, etc.)
+// - input:  keyboard/mouse polling + typed text (cell-space only)
+// - font:   font paths + point size (regular/bold/italic/bold-italic)
 //
 // Rendering notes:
+// - All drawing is in *cell coordinates*; pixels are never exposed to Lua.
 // - draw.glyph uses only the first UTF-8 codepoint from `text`.
-// - Glyph quads are clipped to the cell rectangle.
+// - Glyph quads are clipped to the destination cell rectangle.
+
 
 import rl       "vendor:raylib"
 import lua      "luajit"
@@ -27,18 +30,21 @@ import c        "core:c"
 
 push_lua_module :: proc(L: ^lua.State, module_name: cstring) {
 	// Stack on entry: [module_table]
-
+	
 	lua.getglobal(L, cstring("package"))         // [module_table, package]
 	lua.getfield(L, -1, cstring("loaded"))       // [module_table, package, loaded]
-
+	
 	lua.pushvalue(L, -3)                         // [module_table, package, loaded, module_table]
 	lua.setfield(L, -2, module_name)             // loaded[module_name] = module_table (pops copy)
-
+	
+	
+	
 	lua.pop(L, 3)                                // pop loaded, package, module_table -> []
 }
 
-// register_lua_api registers Lua tables/functions (no size-dependent globals).
-// Call update_lua_globals(L) after the window + Cell_W/Cell_H are ready.
+// register_lua_api registers the Lua module tables (draw/window/input/font).
+// Grid/cell dimensions are queried at runtime via window.grid_size()/window.cell_size()
+// once fonts are loaded (Cell_W/Cell_H computed by the font pipeline).
 register_lua_api :: proc(L: ^lua.State) {
 	register_draw_api(L)
 	register_window_api(L)
@@ -99,7 +105,8 @@ call_lua_number :: proc(L: ^lua.State, name: cstring, x: f64) -> bool {
 // main
 // -----------------------------------------------------------------------------
 
-// main boots Lua, runs init, loads fonts, publishes TERM_COLS/ROWS, and runs the update/draw loop.
+// main boots Lua, loads main.lua, calls init_terminal(), loads fonts/cell metrics,
+// then runs the update/draw loop (including input_begin_frame() once per frame).
 main :: proc() {
 	// -------------------------------------------------------------------------
 	// Lua state + script load

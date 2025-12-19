@@ -68,8 +68,8 @@ Mouse_Cell_Delta: Mouse_Cell
 // Mouse_Sample_Initialized is false until we have taken at least one frame sample.
 Mouse_Sample_Initialized: bool
 
-// NOTE: Cell_W / Cell_H are defined by the host (tuicore.odin) as i32 globals.
-// They represent the pixel size of one terminal cell.
+// NOTE: Cell_W / Cell_H are host globals representing the pixel size of one terminal cell.
+// They are computed by the font pipeline after fonts are loaded/rebuilt.
 
 
 // -----------------------------------------------------------------------------

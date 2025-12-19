@@ -19,7 +19,7 @@ A small set of primitives exposed to Lua:
 
 * Text rendering is **TTF/OTF-based** (not a bitmap font sheet).
 * Rendering is **cell-space / textmode**: you work in `(x, y)` cells.
-* RuneSlate is **not a terminal emulator**.
+* Monotome is **not a terminal emulator**.
 
 ## Status
 

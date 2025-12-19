@@ -376,7 +376,8 @@ lua_window_get_clipboard :: proc "c" (L: ^lua.State) -> c.int {
 // Info
 // -----------------------------------------------------------------------------
 
-// window.pixel_size() -> px_w, px_h (GetScreenWidth/Height).
+// window.render_size() -> render_w, render_h (raylib GetRenderWidth/Height).
+// Note: this is the render target size in pixels (not necessarily the same as screen size).
 lua_window_render_size :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushinteger(L, lua.Integer(rl.GetRenderWidth()))
 	lua.pushinteger(L, lua.Integer(rl.GetRenderHeight()))
