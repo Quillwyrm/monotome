@@ -2,19 +2,25 @@ package main
 
 // api_draw.odin
 //
-// draw.* Lua API (cell-based terminal primitives), backed by raylib.
+// draw.* Lua API (cell-space primitives), backed by raylib.
+//
+// Contract (current state):
+// - Coordinates are in CELL space (pixels never exposed to Lua).
+// - Engine does no layout: no wrapping, no alignment, no clipping beyond grid bounds.
+// - draw.text is a single-line primitive: it stops at '\n'.
+// - face is a direct choice (Lua 1..4 -> host 0..3). No gating, no fallback magic.
 //
 // Notes:
-// - Uses global Cell_W/Cell_H and Active_Font[] owned by the host.
-// - draw.glyph renders only the first UTF-8 codepoint from `text`.
-// - draw.text renders UTF-8 text, one glyph per cell, face 0 only.
+// - Uses global Cell_W/Cell_H, Font_Px, and Active_Font[] owned by the host.
+// - draw.glyph draws only the first UTF-8 codepoint from `text`.
+// - draw.cell fills a single cell rectangle (background fill).
 
 import rl  "vendor:raylib"
 import lua "luajit"
-import "core:strings"
-import "base:runtime"
-import    "core:c"
 
+import "base:runtime"
+import "core:c"
+import "core:strings"
 
 // -----------------------------------------------------------------------------
 // Registration
@@ -22,14 +28,13 @@ import    "core:c"
 
 register_draw_api :: proc(L: ^lua.State) {
 	lua.newtable(L)
-	lua.pushcfunction(L, lua_draw_clear); lua.setfield(L, -2, cstring("clear"))
-	lua.pushcfunction(L, lua_draw_cell);  lua.setfield(L, -2, cstring("cell"))
-	lua.pushcfunction(L, lua_draw_rect);  lua.setfield(L, -2, cstring("rect"))
-	lua.pushcfunction(L, lua_draw_glyph); lua.setfield(L, -2, cstring("glyph"))
-	lua.pushcfunction(L, lua_draw_text);  lua.setfield(L, -2, cstring("text"))
-	push_lua_module(L, cstring("tuicore.draw"))
-}
 
+	lua.pushcfunction(L, lua_draw_clear) ; lua.setfield(L, -2, cstring("clear"))
+	lua.pushcfunction(L, lua_draw_cell)  ; lua.setfield(L, -2, cstring("cell"))
+	lua.pushcfunction(L, lua_draw_rect)  ; lua.setfield(L, -2, cstring("rect"))
+	lua.pushcfunction(L, lua_draw_text)  ; lua.setfield(L, -2, cstring("text"))
+
+}
 
 // -----------------------------------------------------------------------------
 // Lua data helpers
@@ -85,65 +90,135 @@ grid_cols_rows :: proc "contextless" () -> (cols, rows: i32) {
 // Host draw primitive (shared core)
 // -----------------------------------------------------------------------------
 
-// draw_glyph draws exactly one codepoint into a single cell at (x,y) using face.
-// Includes █ special-case and cell-clip logic.
-// NOW ALSO enforces: nothing draws outside the cell grid.
-draw_glyph :: proc "contextless" (x, y: i32, color: rl.Color, codepoint: rune, face: i32) {
+// draw_line_cell draws the single-line box drawing UI glyphs using rect geometry.
+// Returns true if it handled `codepoint`, else false.
+//
+// Glyphs handled (11):
+// ─│┌┐└┘├┤┬┴┼
+//
+// Thickness:
+// t = clamp(1, min(Cell_W, Cell_H)/8, 4)
+draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Color) -> bool {
+	// Direction bits: N=1, E=2, S=4, W=8
+	N: u8 = 1
+	E: u8 = 2
+	S: u8 = 4
+	W: u8 = 8
+
+	mask: u8 = 0
+
+	// Map codepoint -> segment mask (only the 11 glyphs we care about).
+	switch codepoint {
+	case rune(0x2500): mask = W | E               // ─
+	case rune(0x2502): mask = N | S               // │
+	case rune(0x250C): mask = E | S               // ┌
+	case rune(0x2510): mask = W | S               // ┐
+	case rune(0x2514): mask = E | N               // └
+	case rune(0x2518): mask = W | N               // ┘
+	case rune(0x251C): mask = N | S | E           // ├
+	case rune(0x2524): mask = N | S | W           // ┤
+	case rune(0x252C): mask = W | E | S           // ┬
+	case rune(0x2534): mask = W | E | N           // ┴
+	case rune(0x253C): mask = N | S | W | E       // ┼
+	case:
+		return false
+	}
+
+	// Cell pixel bounds.
+	x0 := x * Cell_W
+	y0 := y * Cell_H
+	x1 := x0 + Cell_W
+	y1 := y0 + Cell_H
+
+	// Cell-scaled thickness (int, clamped).
+	m := Cell_W
+	if Cell_H < m { m = Cell_H }
+
+	t := m / 5
+	if t < 1 { t = 1 }
+	if t > 4 { t = 4 }
+
+	// Center junction square (t x t), centered in the cell.
+	jx0 := x0 + (Cell_W - t) / 2
+	jy0 := y0 + (Cell_H - t) / 2
+
+	// Always draw the junction to avoid pinholes at joins.
+	rl.DrawRectangle(jx0, jy0, t, t, color)
+
+	// North segment: from top edge to junction.
+	if (mask & N) != 0 {
+		h := jy0 - y0
+		if h > 0 {
+			rl.DrawRectangle(jx0, y0, t, h, color)
+		}
+	}
+
+	// South segment: from junction to bottom edge.
+	if (mask & S) != 0 {
+		sy := jy0 + t
+		h := y1 - sy
+		if h > 0 {
+			rl.DrawRectangle(jx0, sy, t, h, color)
+		}
+	}
+
+	// West segment: from left edge to junction.
+	if (mask & W) != 0 {
+		w := jx0 - x0
+		if w > 0 {
+			rl.DrawRectangle(x0, jy0, w, t, color)
+		}
+	}
+
+	// East segment: from junction to right edge.
+	if (mask & E) != 0 {
+		ex := jx0 + t
+		w := x1 - ex
+		if w > 0 {
+			rl.DrawRectangle(ex, jy0, w, t, color)
+		}
+	}
+
+	return true
+}
+
+
+// draw_glyph draws exactly one codepoint into a single cell at (x,y).
+// Policy:
+// - fixed grid (Cell_W/Cell_H)
+// - grid bounds check only
+// - box drawing UI glyphs are engine-drawn geometry (no font involvement)
+// - face is a direct choice (0..3); no gating, no fallback
+draw_glyph :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Color, requested_face: i32) {
 	cols, rows := grid_cols_rows()
+
+	// Grid clipping: do not draw outside bounds.
 	if x < 0 || y < 0 || x >= cols || y >= rows {
 		return
 	}
 
-	// █ => filled cell (perfect, avoids raster seams).
+	// Full-block special case.
 	if codepoint == rune(0x2588) {
 		rl.DrawRectangle(x * Cell_W, y * Cell_H, Cell_W, Cell_H, color)
 		return
 	}
 
-	font := Active_Font[face]
-	glyph := rl.GetGlyphInfo(font, codepoint)
-	src := rl.GetGlyphAtlasRec(font, codepoint)
-
-	// Cell bounds (clip rect).
-	cell_x := cast(f32)(x * Cell_W)
-	cell_y := cast(f32)(y * Cell_H)
-	clip_l := cell_x
-	clip_t := cell_y
-	clip_r := cell_x + cast(f32)(Cell_W)
-	clip_b := cell_y + cast(f32)(Cell_H)
-
-	// Glyph natural destination in this cell.
-	dst_l := cell_x + cast(f32)(glyph.offsetX)
-	dst_t := cell_y + cast(f32)(glyph.offsetY)
-	dst_r := dst_l + src.width
-	dst_b := dst_t + src.height
-
-	// Intersect glyph dst with cell clip.
-	ix_l := dst_l
-	if clip_l > ix_l { ix_l = clip_l }
-	ix_t := dst_t
-	if clip_t > ix_t { ix_t = clip_t }
-	ix_r := dst_r
-	if clip_r < ix_r { ix_r = clip_r }
-	ix_b := dst_b
-	if clip_b < ix_b { ix_b = clip_b }
-
-	// Fully clipped.
-	if ix_l >= ix_r || ix_t >= ix_b {
+	// Engine-drawn box drawing (deterministic, font-independent).
+	if draw_line_cell(x, y, codepoint, color) {
 		return
 	}
 
-	iw := ix_r - ix_l
-	ih := ix_b - ix_t
+	// Clamp face to 0..3.
+	face := requested_face
+	if face < 0 { face = 0 }
+	if face > 3 { face = 3 }
 
-	// Trim source by the same amount trimmed from destination (1:1 scale).
-	src.x += (ix_l - dst_l)
-	src.y += (ix_t - dst_t)
-	src.width  = iw
-	src.height = ih
+	pos := rl.Vector2{
+		cast(f32)(x * Cell_W),
+		cast(f32)(y * Cell_H),
+	}
 
-	dst := rl.Rectangle{ix_l, ix_t, iw, ih}
-	rl.DrawTexturePro(font.texture, src, dst, rl.Vector2{0, 0}, 0.0, color)
+	rl.DrawTextCodepoint(Active_Font[face], codepoint, pos, cast(f32)(Font_Px), color)
 }
 
 
@@ -159,11 +234,8 @@ lua_draw_clear :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
-
 // draw.cell(x, y, {r,g,b,a})
-// Fills a cell rectangle (cell coords, not pixels).
-// draw.cell(x, y, {r,g,b,a})
-// Fills a cell rectangle (cell coords, not pixels).
+// Fills a single cell rectangle (cell coords, not pixels).
 lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 	x := cast(i32)(lua.L_checkinteger(L, 1))
 	y := cast(i32)(lua.L_checkinteger(L, 2))
@@ -178,10 +250,9 @@ lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
-
 // draw.rect(x, y, w, h, {r,g,b,a})
 // Draws a filled rectangle in *cell space* (converted to pixels internally).
-// NOW clamps in cell space to the drawable grid.
+// Clamps in cell space to the drawable grid.
 lua_draw_rect :: proc "c" (L: ^lua.State) -> c.int {
 	x := cast(i32)(lua.L_checkinteger(L, 1))
 	y := cast(i32)(lua.L_checkinteger(L, 2))
@@ -209,90 +280,114 @@ lua_draw_rect :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
-
-// draw.glyph(x, y, {r,g,b,a}, text, face)
-// Renders the first UTF-8 codepoint from `text` into a single cell.
-// face is 0..3; non-base codepoints are forced to face 0 (coverage policy).
-lua_draw_glyph :: proc "c" (L: ^lua.State) -> c.int {
+// draw.text(x, y, text, {r,g,b,a}, face?)
+// Renders UTF-8 text horizontally, one codepoint per grid cell.
+// Single-line primitive: stops at '\n'.
+// face: Lua 1..4. Defaults to 1 (Regular).
+lua_draw_text :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
-	
+
 	x := cast(i32)(lua.L_checkinteger(L, 1))
 	y := cast(i32)(lua.L_checkinteger(L, 2))
-	color := read_rgba_table(L, 3)
 
 	text_len: c.size_t
-	text_c := lua.L_checklstring(L, 4, &text_len)
-	face := cast(i32)(lua.L_checkinteger(L, 5))
+	text_c := lua.L_checklstring(L, 3, &text_len)
 
-	// Guard: face must be in [0..3] (error on misuse).
-	if face < 0 || face > 3 {
-		return lua.L_error(L, cstring("draw.glyph: face out of range (expected 0..3, got %d)"), face)
+	color := read_rgba_table(L, 4)
+
+	// Optional: face (Lua 1..4 -> host 0..3)
+	face := i32(0)
+	if lua.gettop(L) >= 5 && !lua.isnil(L, 5) {
+		lua_face := cast(i32)(lua.L_checkinteger(L, 5))
+		if lua_face < 1 || lua_face > 4 {
+			return lua.L_error(L, cstring("draw.textOLD: face out of range (expected 1..4, got %d)"), lua_face)
+		}
+		face = lua_face - 1
 	}
 
-	// Decode the first UTF-8 rune from the Lua string (no pointer math).
-	s := strings.string_from_ptr(cast(^u8) text_c, int(text_len))
-	if len(s) == 0 {
-		return 0
-	}
-
-	codepoint: rune
-	for r in s {
-		codepoint = r
-		break
-	}
-
-	// Policy: only BASE_CODEPOINTS may use non-regular faces (coverage fallback to face 0).
-	base_ok := false
-	for r in BASE_CODEPOINTS {
-		if codepoint >= r.first && codepoint <= r.last {
-			base_ok = true
+	s := strings.string_from_ptr(cast(^u8)text_c, int(text_len))
+	for cp in s {
+		// Single-line primitive: stop at newline.
+		if cp == '\n' {
 			break
 		}
-	}
-	if !base_ok {
-		face = 0
+
+		draw_glyph(x, y, cp, color, face)
+		x += 1
 	}
 
-	draw_glyph(x, y, color, codepoint, face)
 	return 0
 }
 
 
-// draw.text(x, y, text, {r,g,b,a}, len?)
-// UTF-8 text, one glyph per cell, face 0 only.
-// `len` is measured in *cells* (1 rune == 1 cell here). If omitted, there is no limit.
-// Newline policy: stop drawing at the first '\n' (single-line primitive).
-lua_draw_text :: proc "c" (L: ^lua.State) -> c.int {
+
+// draw.text_span(x, y, text, {r,g,b,a} [, face])
+//
+// Span renderer: one raylib DrawTextEx call.
+// - cell-space origin (x,y) -> pixel-space via (Cell_W/Cell_H)
+// - single-line: stops at first '\n'
+// - face: Lua 1..4 (defaults to 1 -> host face 0)
+// - NO per-glyph fallback; the face applies to the whole span
+lua_draw_text_span :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
-	
-	start_x := cast(i32)(lua.L_checkinteger(L, 1))
-	y := cast(i32)(lua.L_checkinteger(L, 2))
+
+	x_cell := cast(i32)(lua.L_checkinteger(L, 1))
+	y_cell := cast(i32)(lua.L_checkinteger(L, 2))
+
 	text_len: c.size_t
-	text_c := lua.L_checklstring(L, 3, &text_len)
-	
+	text_ptr := lua.L_checklstring(L, 3, &text_len)
+
 	color := read_rgba_table(L, 4)
 
-	max_cells := i32(-1)
-	if lua.gettop(L) >= 5 {
-		max_cells = cast(i32)(lua.L_checkinteger(L, 5))
+	// Optional face: Lua 1..4 -> host 0..3. Defaults to regular (0).
+	face := i32(0)
+	if lua.gettop(L) >= 5 && !lua.isnil(L, 5) {
+		lua_face := cast(i32)(lua.L_checkinteger(L, 5))
+		if lua_face >= 1 && lua_face <= 4 {
+			face = lua_face - 1
+		} else {
+			// Face fallback only: invalid face => regular.
+			face = 0
+		}
 	}
 
-	x := start_x
-	drawn := i32(0)
-
-	s := strings.string_from_ptr(cast(^u8) text_c, int(text_len))
-	for codepoint in s {
-		if max_cells >= 0 && drawn >= max_cells {
-			break
-		}
-		if codepoint == rune('\n') {
-			break
-		}
-
-		draw_glyph(x, y, color, codepoint, 0)
-		x += 1
-		drawn += 1
+	// Lua string -> Odin string (bounded by text_len).
+	s := strings.string_from_ptr(cast(^u8)text_ptr, int(text_len))
+	if len(s) == 0 {
+		return 0
 	}
+
+	// Single-line: cut at first '\n' (byte scan; '\n' is ASCII).
+	cut := len(s)
+	for i in 0..<len(s) {
+		if s[i] == '\n' {
+			cut = i
+			break
+		}
+	}
+	if cut == 0 {
+		return 0
+	}
+	if cut != len(s) {
+		s = s[:cut]
+	}
+
+	pos := rl.Vector2{
+		cast(f32)(x_cell * Cell_W),
+		cast(f32)(y_cell * Cell_H),
+	}
+
+	// DrawTextEx expects NUL-terminated C string.
+	s_c := strings.clone_to_cstring(s, context.temp_allocator)
+
+	rl.DrawTextEx(
+		Active_Font[face],
+		s_c,
+		pos,
+		cast(f32)(Font_Px),
+		0.0,  // spacing (0 keeps mono feel)
+		color,
+	)
 
 	return 0
 }

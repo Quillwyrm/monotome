@@ -32,11 +32,11 @@ package main
 // - Call input_begin_frame() once per frame (before Lua update) to refresh per-frame caches.
 // - Cell_W / Cell_H must be initialized by the host (pixel size of one terminal cell).
 
-import rl      "vendor:raylib"
-import lua     "luajit"
-import strings "core:strings"
-import runtime "base:runtime"
-import c       "core:c"
+import rl  "vendor:raylib"
+import lua "luajit"
+import "core:strings"
+import "base:runtime"
+import "core:c"
 
 
 // -----------------------------------------------------------------------------
@@ -183,7 +183,6 @@ register_input_api :: proc(L: ^lua.State) {
 	lua.pushcfunction(L, lua_input_mouse_delta);  lua.setfield(L, -2, cstring("mouse_delta"))
 	lua.pushcfunction(L, lua_input_mouse_wheel);  lua.setfield(L, -2, cstring("mouse_wheel"))
 
-	push_lua_module(L, cstring("tuicore.input"))
 }
 
 

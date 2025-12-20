@@ -1,13 +1,7 @@
 package main
 
 // monotome — Lua-scriptable cell-space renderer (textmode look) backed by raylib.
-// Lua must define: init_terminal(), update_terminal(dt), draw_terminal().
-//
-// Exposes to Lua modules:
-// - draw:   clear, cell, rect, glyph, text
-// - window: init/config + metrics (render_size, cell_size, grid_size, etc.)
-// - input:  keyboard/mouse polling + typed text (cell-space only)
-// - font:   font paths + point size (regular/bold/italic/bold-italic)
+
 //
 // Rendering notes:
 // - All drawing is in *cell coordinates*; pixels are never exposed to Lua.
@@ -15,13 +9,13 @@ package main
 // - Glyph quads are clipped to the destination cell rectangle.
 
 
-import rl       "vendor:raylib"
-import lua      "luajit"
-import os       "core:os"
-import fmt      "core:fmt"
-import strings  "core:strings"
-import filepath "core:path/filepath"
-import c        "core:c"
+import rl  "vendor:raylib"
+import lua "luajit"
+import "core:os"
+import "core:fmt"
+import "core:strings"
+import "core:path/filepath"
+import "core:c"
 
 // -----------------------------------------------------------------------------
 // Lua globals + API binding
@@ -30,15 +24,10 @@ import c        "core:c"
 
 push_lua_module :: proc(L: ^lua.State, module_name: cstring) {
 	// Stack on entry: [module_table]
-	
 	lua.getglobal(L, cstring("package"))         // [module_table, package]
 	lua.getfield(L, -1, cstring("loaded"))       // [module_table, package, loaded]
-	
 	lua.pushvalue(L, -3)                         // [module_table, package, loaded, module_table]
 	lua.setfield(L, -2, module_name)             // loaded[module_name] = module_table (pops copy)
-	
-	
-	
 	lua.pop(L, 3)                                // pop loaded, package, module_table -> []
 }
 
@@ -46,11 +35,33 @@ push_lua_module :: proc(L: ^lua.State, module_name: cstring) {
 // Grid/cell dimensions are queried at runtime via window.grid_size()/window.cell_size()
 // once fonts are loaded (Cell_W/Cell_H computed by the font pipeline).
 register_lua_api :: proc(L: ^lua.State) {
-	register_draw_api(L)
+	// root module table: monotome
+	lua.newtable(L)
+
+	// monotome.runtime = {}
+	lua.newtable(L)
+	lua.setfield(L, -2, cstring("runtime"))
+
+	// monotome.draw
+	register_draw_api(L)                       // pushes draw table
+	lua.setfield(L, -2, cstring("draw"))        // monotome.draw = draw_table
+
+	// monotome.window
 	register_window_api(L)
+	lua.setfield(L, -2, cstring("window"))
+
+	// monotome.input
 	register_input_api(L)
+	lua.setfield(L, -2, cstring("input"))
+
+	// monotome.font
 	register_font_api(L)
+	lua.setfield(L, -2, cstring("font"))
+
+	// install as require("monotome")
+	push_lua_module(L, cstring("monotome"))
 }
+
 
 // -----------------------------------------------------------------------------
 // Lua errors + call helpers
@@ -64,42 +75,51 @@ lua_traceback :: proc "c" (L: ^lua.State) -> c.int {
 	return 1
 }
 
-// call_lua_noargs calls global Lua function name() -> no returns.
-// On failure, prints a traceback and returns false.
-call_lua_noargs :: proc(L: ^lua.State, name: cstring) -> bool {
+call_lua_noargs :: proc(L: ^lua.State, fn: cstring) -> bool {
 	lua.pushcfunction(L, lua_traceback)
 	errfunc := lua.gettop(L)
 
-	lua.getglobal(L, name)
+	// Lookup: package.loaded["monotome"].runtime[fn]
+	lua.getglobal(L, cstring("package"))
+	lua.getfield(L, -1, cstring("loaded"))
+	lua.getfield(L, -1, cstring("monotome"))
+	lua.getfield(L, -1, cstring("runtime"))
+	lua.getfield(L, -1, fn)
 
 	ok := lua.pcall(L, 0, 0, cast(c.int)(errfunc)) == lua.Status.OK
 	if !ok {
 		err := lua.tostring(L, -1)
-		fmt.printf("Lua error in %s:\n%s\n", name, err)
+		fmt.printf("Lua error in monotome.runtime.%s:\n%s\n", fn, err)
 	}
 
 	lua.settop(L, 0)
 	return ok
 }
 
-// call_lua_number calls global Lua function name(x) -> no returns.
-// On failure, prints a traceback and returns false.
-call_lua_number :: proc(L: ^lua.State, name: cstring, x: f64) -> bool {
+
+call_lua_number :: proc(L: ^lua.State, fn: cstring, x: f64) -> bool {
 	lua.pushcfunction(L, lua_traceback)
 	errfunc := lua.gettop(L)
 
-	lua.getglobal(L, name)
+	// Lookup: package.loaded["monotome"].runtime[fn]
+	lua.getglobal(L, cstring("package"))
+	lua.getfield(L, -1, cstring("loaded"))
+	lua.getfield(L, -1, cstring("monotome"))
+	lua.getfield(L, -1, cstring("runtime"))
+	lua.getfield(L, -1, fn)
+
 	lua.pushnumber(L, cast(lua.Number)(x))
 
 	ok := lua.pcall(L, 1, 0, cast(c.int)(errfunc)) == lua.Status.OK
 	if !ok {
 		err := lua.tostring(L, -1)
-		fmt.printf("Lua error in %s:\n%s\n", name, err)
+		fmt.printf("Lua error in monotome.runtime.%s:\n%s\n", fn, err)
 	}
 
 	lua.settop(L, 0)
 	return ok
 }
+
 
 // -----------------------------------------------------------------------------
 // main
@@ -118,7 +138,6 @@ main :: proc() {
 	register_lua_api(L)
 
 	init_font_paths_defaults()
-	Base_Codepoints, Regular_Codepoints, Regular_Written = build_codepoint_lists()
 
 	rl.SetTraceLogLevel(rl.TraceLogLevel.ERROR)
 
@@ -141,7 +160,7 @@ main :: proc() {
 	lua.settop(L, 0)
 
 	// Lua init must create the window (window.init).
-	if !call_lua_noargs(L, cstring("init_terminal")) {
+	if !call_lua_noargs(L, cstring("init")) {
 		return
 	}
 	defer rl.CloseWindow()
@@ -165,13 +184,13 @@ main :: proc() {
 		input_begin_frame()
 
 		// --- Lua update ---
-		if !call_lua_number(L, cstring("update_terminal"), dt_s) {
+		if !call_lua_number(L, cstring("update"), dt_s) {
 			break
 		}
 
 		// --- Lua draw ---
 		rl.BeginDrawing()
-		if !call_lua_noargs(L, cstring("draw_terminal")) {
+		if !call_lua_noargs(L, cstring("draw")) {
 			rl.EndDrawing()
 			break
 		}

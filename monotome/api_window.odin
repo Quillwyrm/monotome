@@ -86,7 +86,6 @@ register_window_api :: proc(L: ^lua.State) {
 	lua.pushcfunction(L, lua_window_get_clipboard) ; lua.setfield(L, -2, cstring("get_clipboard"))
 	lua.pushcfunction(L, lua_window_set_clipboard) ; lua.setfield(L, -2, cstring("set_clipboard"))
 
-	push_lua_module(L, cstring("tuicore.window"))
 }
 
 // -----------------------------------------------------------------------------
@@ -176,14 +175,13 @@ lua_window_restore  :: proc "c" (L: ^lua.State) -> c.int { rl.RestoreWindow(); r
 // Setters
 //------------------------------------------------------------------------------
 
+// window.set_title(title) -> SetWindowTitle().
 lua_window_set_title :: proc "c" (L: ^lua.State) -> c.int {
 	title := lua.L_checklstring(L, 1, nil)
 	rl.SetWindowTitle(title)
 	return 0
 }
 
-
-// window.set_title(title) -> SetWindowTitle().
 // window.set_size(w, h) -> SetWindowSize().
 lua_window_set_size :: proc "c" (L: ^lua.State) -> c.int {
 	w := c.int(int(lua.L_checkinteger(L, 1)))
