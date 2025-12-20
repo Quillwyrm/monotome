@@ -41,7 +41,7 @@ end
 
 local function header(x, y, w, title)
 	draw.rect(x, y, w, 1, C.accent)
-	draw.text(x + 1, y, title:upper(), C.bg, 2) -- face=2 (Bold)
+	draw.text(x + 1, y, title:upper(), C.bg, 1) -- face=2 (Bold)
 end
 
 local function panel_frame(x, y, w, h)
@@ -156,7 +156,7 @@ function runtime.draw()
 	draw.text(2, cur_y, "FONT:", C.muted)
 	if btn(8, cur_y, " - ") then S.font_pt = math.max(8, S.font_pt - 1); font.set_size(S.font_pt) end
 	if btn(13, cur_y, " + ") then S.font_pt = S.font_pt + 1; font.set_size(S.font_pt) end
-	draw.text(18, cur_y, tostring(S.font_pt) .. "pt", C.text); cur_y = cur_y + 2
+	draw.text(18, cur_y, tostring(S.font_pt) .. "px", C.text); cur_y = cur_y + 2
 
 	if btn(2, cur_y, " DECOR ", not S.undec) then S.undec = not S.undec; window.set_undecorated(S.undec) end
 	if btn(11, cur_y, " MIN ") then window.minimize() end

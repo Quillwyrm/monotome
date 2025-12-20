@@ -98,6 +98,14 @@ grid_cols_rows :: proc "contextless" () -> (cols, rows: i32) {
 //
 // Thickness:
 // t = clamp(1, min(Cell_W, Cell_H)/8, 4)
+BOX_STROKE_DIV: i32 = 5
+BOX_STROKE_MAX: i32 = 4
+
+// When centering isn't representable (odd/even mismatch), snap by 1px.
+// 0 = bias left/up, 1 = bias right/down.
+BOX_CENTER_BIAS_X: i32 = 0
+BOX_CENTER_BIAS_Y: i32 = 0
+
 draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Color) -> bool {
 	// Direction bits: N=1, E=2, S=4, W=8
 	N: u8 = 1
@@ -107,7 +115,6 @@ draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Colo
 
 	mask: u8 = 0
 
-	// Map codepoint -> segment mask (only the 11 glyphs we care about).
 	switch codepoint {
 	case rune(0x2500): mask = W | E               // ─
 	case rune(0x2502): mask = N | S               // │
@@ -130,22 +137,30 @@ draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Colo
 	x1 := x0 + Cell_W
 	y1 := y0 + Cell_H
 
-	// Cell-scaled thickness (int, clamped).
+	// Thickness from the smaller cell dimension (uniform stroke weight).
 	m := Cell_W
 	if Cell_H < m { m = Cell_H }
 
-	t := m / 5
+	t := m / BOX_STROKE_DIV
 	if t < 1 { t = 1 }
-	if t > 4 { t = 4 }
+	if t > BOX_STROKE_MAX { t = BOX_STROKE_MAX }
 
-	// Center junction square (t x t), centered in the cell.
+	// Center junction (t x t). If exact centering isn't possible, apply a stable 1px snap.
 	jx0 := x0 + (Cell_W - t) / 2
 	jy0 := y0 + (Cell_H - t) / 2
 
-	// Always draw the junction to avoid pinholes at joins.
+	// If (Cell_W - t) is odd, true center is half-pixel; choose a consistent snap.
+	if ((Cell_W - t) & 1) != 0 {
+		jx0 += BOX_CENTER_BIAS_X
+	}
+	if ((Cell_H - t) & 1) != 0 {
+		jy0 += BOX_CENTER_BIAS_Y
+	}
+
+	// Always draw the junction to avoid pinholes.
 	rl.DrawRectangle(jx0, jy0, t, t, color)
 
-	// North segment: from top edge to junction.
+	// North segment.
 	if (mask & N) != 0 {
 		h := jy0 - y0
 		if h > 0 {
@@ -153,7 +168,7 @@ draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Colo
 		}
 	}
 
-	// South segment: from junction to bottom edge.
+	// South segment.
 	if (mask & S) != 0 {
 		sy := jy0 + t
 		h := y1 - sy
@@ -162,7 +177,7 @@ draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Colo
 		}
 	}
 
-	// West segment: from left edge to junction.
+	// West segment.
 	if (mask & W) != 0 {
 		w := jx0 - x0
 		if w > 0 {
@@ -170,7 +185,7 @@ draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Colo
 		}
 	}
 
-	// East segment: from junction to right edge.
+	// East segment.
 	if (mask & E) != 0 {
 		ex := jx0 + t
 		w := x1 - ex
@@ -218,7 +233,7 @@ draw_glyph :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Color, r
 		cast(f32)(y * Cell_H),
 	}
 
-	rl.DrawTextCodepoint(Active_Font[face], codepoint, pos, cast(f32)(Font_Px), color)
+	rl.DrawTextCodepoint(Active_Font[face], codepoint, pos, cast(f32)(Font_Size), color)
 }
 
 
@@ -384,7 +399,7 @@ lua_draw_text_span :: proc "c" (L: ^lua.State) -> c.int {
 		Active_Font[face],
 		s_c,
 		pos,
-		cast(f32)(Font_Px),
+		cast(f32)(Font_Size),
 		0.0,  // spacing (0 keeps mono feel)
 		color,
 	)

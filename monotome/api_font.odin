@@ -30,11 +30,9 @@ import "core:strings"
 // Global config/state
 // -----------------------------------------------------------------------------
 
-// User-facing font size in points (editor UX).
-Font_Pt: c.int = 16
-
-// Pixel size passed to raylib LoadFontEx (computed from Font_Pt + DPI).
-Font_Px: c.int
+// User-facing font size in pixels.
+// This is passed directly to LoadFontEx and DrawText* calls.
+Font_Size: c.int = 24
 
 // Faces: 0=Regular, 1=Bold, 2=Italic, 3=BoldItalic.
 Active_Font: [4]rl.Font
@@ -173,8 +171,7 @@ rebuild_fonts :: proc() {
 		Codepoints = build_codepoints()
 	}
 
-	font_px := compute_font_px()
-	load_active_fonts(font_px, Codepoints)
+	load_active_fonts(Font_Size, Codepoints)
 
 	compute_cell_metrics()
 	validate_monospace_contract()
@@ -198,15 +195,15 @@ unload_active_fonts :: proc() {
 // Lua API entrypoints
 // -----------------------------------------------------------------------------
 
-// lua_font_init implements: font.init(pt [, paths4])
+// lua_font_init implements: font.init(size [, paths4])
 lua_font_init :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
-	pt := cast(c.int)(lua.L_checkinteger(L, 1))
-	if pt <= 0 {
-		return lua.L_error(L, cstring("font.init: pt must be > 0"))
+	size := cast(c.int)(lua.L_checkinteger(L, 1))
+	if size <= 0 {
+		return lua.L_error(L, cstring("font.init: size must be > 0"))
 	}
-	Font_Pt = pt
+	Font_Size = size
 
 	if lua.gettop(L) >= 2 {
 		read_paths_and_store(L, 2, cstring("font.init"))
@@ -218,6 +215,7 @@ lua_font_init :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
+
 // lua_font_set_paths implements: font.set_paths(paths4)
 lua_font_set_paths :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
@@ -227,25 +225,27 @@ lua_font_set_paths :: proc "c" (L: ^lua.State) -> c.int {
 	return 0
 }
 
-// lua_font_set_size implements: font.set_size(pt)
+// lua_font_set_size implements: font.set_size(size)
 lua_font_set_size :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
-	pt := cast(c.int)(lua.L_checkinteger(L, 1))
-	if pt <= 0 {
-		return lua.L_error(L, cstring("font.set_size: pt must be > 0"))
+	size := cast(c.int)(lua.L_checkinteger(L, 1))
+	if size <= 0 {
+		return lua.L_error(L, cstring("font.set_size: size must be > 0"))
 	}
-	Font_Pt = pt
+	Font_Size = size
 
 	rebuild_fonts()
 	return 0
 }
 
-// lua_font_size implements: font.size() -> pt
+
+// lua_font_size implements: font.size() -> size
 lua_font_size :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushinteger(L, cast(lua.Integer)(Font_Pt))
+	lua.pushinteger(L, cast(lua.Integer)(Font_Size))
 	return 1
 }
+
 
 // lua_font_paths implements: font.paths() -> { [1]=..., [2]=..., [3]=..., [4]=... }
 lua_font_paths :: proc "c" (L: ^lua.State) -> c.int {
@@ -333,18 +333,6 @@ init_font_paths_defaults :: proc() {
 // Font pipeline internals
 // -----------------------------------------------------------------------------
 
-// compute_font_px converts points (Font_Pt) into the pixel size used by LoadFontEx,
-// based on the window DPI scale. Also writes Font_Px.
-compute_font_px :: proc() -> c.int {
-	dpi := rl.GetWindowScaleDPI()
-	scale := dpi[0]
-
-	px_f := cast(f32)(Font_Pt) * (4.0 / 3.0) * scale
-	px := cast(c.int)(px_f + 0.5)
-
-	Font_Px = px
-	return px
-}
 
 // load_active_fonts loads all 4 faces using the same baked codepoint list,
 // and applies POINT+CLAMP to each atlas texture.
