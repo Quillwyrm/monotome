@@ -5,17 +5,23 @@ package main
 // font.* Lua API + host font pipeline.
 //
 // Lua surface:
-// - font.init(pt, paths4?)
+// - font.init(size_px, paths4?)
 // - font.set_paths(paths4)   -- table length must be 4
-// - font.set_size(pt)
-// - font.size()  -> pt
+// - font.set_size(size_px)
+// - font.size()  -> size_px
 // - font.paths() -> { [1]=..., [2]=..., [3]=..., [4]=... }  (copy for UI)
 //
 // Contract:
 // - All rendering uses a fixed cell grid derived from face 0 (Regular).
 // - All 4 faces bake the SAME codepoint set.
 // - No base-vs-regular policy, no styled-face gating, no fallback magic.
-// - If a face file is missing a glyph, you get tofu/'?' (this is acceptable).
+// - If a face file is missing a glyph, you get tofu/'?' (acceptable).
+//
+// Reload contract:
+// - Lua API calls (font.set_size/set_paths/init) NEVER rebuild immediately.
+// - They only update stored settings and mark Fonts_Dirty.
+// - The engine calls apply_pending_font_changes() at a frame boundary.
+// - apply_pending_font_changes() rebuilds into a temp array and commits via swap.
 
 import lua "luajit"
 import rl  "vendor:raylib"
@@ -30,22 +36,24 @@ import "core:strings"
 // Global config/state
 // -----------------------------------------------------------------------------
 
-// User-facing font size in pixels.
-// This is passed directly to LoadFontEx and DrawText* calls.
-Font_Size: c.int = 24
+// User-requested font size in pixels.
+// This is the value exposed to Lua (font.size()) and set by font.set_size().
+Font_Size: c.int = 18
+
+// Currently active baked size (pixels) used by draw code.
+// Only changes when apply_pending_font_changes() commits.
+Font_Size_Active: c.int = 24
 
 // Faces: 0=Regular, 1=Bold, 2=Italic, 3=BoldItalic.
 Active_Font: [4]rl.Font
 Fonts_Loaded: bool
 
+// True when size/paths changed and a rebuild is needed.
+Fonts_Dirty: bool
+
 // Grid metrics (pixels).
 Cell_W: i32
 Cell_H: i32
-
-// Legacy hooks for older glyph-atlas draw code paths.
-// Kept so old drawing code can still compile; currently always 0.
-Cell_Shift_X: i32
-Cell_Shift_Y: i32
 
 // Codepoints baked into ALL faces. Built once and reused.
 Codepoints: []rune
@@ -55,10 +63,10 @@ MAX_FONT_PATH_BYTES :: 4096
 
 // Default face filenames (relative to exe_dir/fonts/).
 Default_Font_File: [4]string = {
-	"JetBrainsMono-Regular.ttf",
-	"JetBrainsMono-Bold.ttf",
-	"JetBrainsMono-Italic.ttf",
-	"JetBrainsMono-BoldItalic.ttf",
+	"CaskaydiaCoveNerdFont-Regular.ttf",
+	"CaskaydiaCoveNerdFont-Bold.ttf",
+	"CaskaydiaCoveNerdFont-Italic.ttf",
+	"CaskaydiaCoveNerdFont-BoldItalic.ttf",
 }
 
 // Runtime path state (single source of truth).
@@ -128,7 +136,7 @@ build_codepoints :: proc() -> []rune {
 // Module registration
 // -----------------------------------------------------------------------------
 
-// register_font_api registers the tuicore.font Lua module table.
+// register_font_api registers the monotome.font Lua module table.
 register_font_api :: proc(L: ^lua.State) {
 	lua.newtable(L)
 
@@ -137,29 +145,26 @@ register_font_api :: proc(L: ^lua.State) {
 	lua.pushcfunction(L, lua_font_set_size)  ; lua.setfield(L, -2, cstring("set_size"))
 	lua.pushcfunction(L, lua_font_size)      ; lua.setfield(L, -2, cstring("size"))
 	lua.pushcfunction(L, lua_font_paths)     ; lua.setfield(L, -2, cstring("paths"))
-
 }
 
 // -----------------------------------------------------------------------------
-// Public font pipeline entrypoints (host-side)
+// Host-side apply/commit
 // -----------------------------------------------------------------------------
 
-// ensure_fonts_loaded makes sure Active_Font[] and cell metrics are ready.
-// Safe to call from draw/input subsystems that need fonts.
-ensure_fonts_loaded :: proc() {
-	if Fonts_Loaded {
-		return
-	}
-	rebuild_fonts()
-}
-
-// rebuild_fonts unloads current faces (if any), (re)loads all 4 faces, and recomputes cell metrics.
-// This is the only place that should set Fonts_Loaded=true.
-rebuild_fonts :: proc() {
-	// This proc allocates and uses temp allocators (paths), so ensure context exists.
+// apply_pending_font_changes rebuilds all 4 faces (if needed) and commits via swap.
+//
+// Safe call sites:
+// - once after window creation (before first draw)
+// - once per frame, after Lua update() and before Lua draw()
+apply_pending_font_changes :: proc() {
 	context = runtime.default_context()
 
-	unload_active_fonts()
+	if !Fonts_Loaded {
+		Fonts_Dirty = true
+	}
+	if !Fonts_Dirty {
+		return
+	}
 
 	// If host hasn't installed paths yet, use shipped defaults (exe_dir/fonts/...).
 	if Font_Path_Len[0] == 0 {
@@ -171,17 +176,77 @@ rebuild_fonts :: proc() {
 		Codepoints = build_codepoints()
 	}
 
-	load_active_fonts(Font_Size, Codepoints)
+	if Font_Size <= 0 {
+		panic("apply_pending_font_changes: Font_Size must be > 0")
+	}
 
-	compute_cell_metrics()
-	validate_monospace_contract()
+	// --- Rebuild into temporary fonts (do not touch Active_Font until commit). ---
+	new_fonts: [4]rl.Font
+	for i in 0..<4 {
+		new_fonts[i] = rl.LoadFontEx(
+			Font_Path[i],
+			Font_Size,
+			&Codepoints[0],
+			cast(c.int)(len(Codepoints)),
+		)
+		rl.SetTextureFilter(new_fonts[i].texture, rl.TextureFilter.POINT)
+		rl.SetTextureWrap(new_fonts[i].texture, rl.TextureWrap.CLAMP)
+	}
+
+	// Compute new cell metrics from the new regular face (face 0) BEFORE commit.
+	// Cell_W comes from SPACE advance; Cell_H comes from font.baseSize.
+	new_cell_w: i32
+	new_cell_h: i32
+	{
+		font := new_fonts[0]
+		space := rune(' ')
+		idx := rl.GetGlyphIndex(font, space)
+		g := font.glyphs[idx]
+
+		cell_w := cast(i32)(g.advanceX)
+		if cell_w <= 0 {
+			// Fallback: derive width from glyph image/rec (prevents Cell_W=0).
+			w := cast(i32)(g.image.width)
+			if w <= 0 {
+				rec := font.recs[idx]
+				w = cast(i32)(rec.width)
+			}
+			if w <= 0 {
+				w = 1
+			}
+			cell_w = w
+		}
+
+		new_cell_w = cell_w
+		new_cell_h = cast(i32)(font.baseSize)
+	}
+
+	// --- Commit swap. ---
+	old_fonts := Active_Font
+	had_old := Fonts_Loaded
+
+	Active_Font = new_fonts
+	Font_Size_Active = Font_Size
+	Cell_W = new_cell_w
+	Cell_H = new_cell_h
 
 	Fonts_Loaded = true
+	Fonts_Dirty = false
 	Mouse_Sample_Initialized = false
+
+	// Optional diagnostics for mono contract.
+	validate_monospace_contract()
+
+	// --- Retire old fonts AFTER commit. ---
+	if had_old {
+		for i in 0..<4 {
+			rl.UnloadFont(old_fonts[i])
+		}
+	}
 }
 
-// unload_active_fonts releases the 4 raylib fonts if loaded.
-unload_active_fonts :: proc() {
+// font_shutdown releases the 4 raylib fonts (used at program shutdown).
+font_shutdown :: proc() {
 	if !Fonts_Loaded {
 		return
 	}
@@ -195,7 +260,7 @@ unload_active_fonts :: proc() {
 // Lua API entrypoints
 // -----------------------------------------------------------------------------
 
-// lua_font_init implements: font.init(size [, paths4])
+// lua_font_init implements: font.init(size_px [, paths4])
 lua_font_init :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -211,21 +276,20 @@ lua_font_init :: proc "c" (L: ^lua.State) -> c.int {
 		init_font_paths_defaults()
 	}
 
-	rebuild_fonts()
+	Fonts_Dirty = true
 	return 0
 }
-
 
 // lua_font_set_paths implements: font.set_paths(paths4)
 lua_font_set_paths :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
 	read_paths_and_store(L, 1, cstring("font.set_paths"))
-	rebuild_fonts()
+	Fonts_Dirty = true
 	return 0
 }
 
-// lua_font_set_size implements: font.set_size(size)
+// lua_font_set_size implements: font.set_size(size_px)
 lua_font_set_size :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
@@ -235,12 +299,11 @@ lua_font_set_size :: proc "c" (L: ^lua.State) -> c.int {
 	}
 	Font_Size = size
 
-	rebuild_fonts()
+	Fonts_Dirty = true
 	return 0
 }
 
-
-// lua_font_size implements: font.size() -> size
+// lua_font_size implements: font.size() -> size_px
 lua_font_size :: proc "c" (L: ^lua.State) -> c.int {
 	lua.pushinteger(L, cast(lua.Integer)(Font_Size))
 	return 1
@@ -250,7 +313,6 @@ lua_font_size :: proc "c" (L: ^lua.State) -> c.int {
 // lua_font_paths implements: font.paths() -> { [1]=..., [2]=..., [3]=..., [4]=... }
 lua_font_paths :: proc "c" (L: ^lua.State) -> c.int {
 	lua.newtable(L)
-
 	for face in 0..<4 {
 		p := cast(cstring)(&Font_Path_Buf[face][0])
 		lua.pushlstring(L, p, c.size_t(Font_Path_Len[face]))
@@ -330,61 +392,8 @@ init_font_paths_defaults :: proc() {
 }
 
 // -----------------------------------------------------------------------------
-// Font pipeline internals
+// Diagnostics: monospace contract warnings
 // -----------------------------------------------------------------------------
-
-
-// load_active_fonts loads all 4 faces using the same baked codepoint list,
-// and applies POINT+CLAMP to each atlas texture.
-load_active_fonts :: proc(font_px: c.int, codepoints: []rune) {
-	if len(codepoints) == 0 {
-		panic("load_active_fonts: empty codepoint set")
-	}
-
-	for i in 0..<4 {
-		Active_Font[i] = rl.LoadFontEx(
-			Font_Path[i],
-			font_px,
-			&codepoints[0],
-			cast(c.int)(len(codepoints)),
-		)
-		rl.SetTextureFilter(Active_Font[i].texture, rl.TextureFilter.POINT)
-		rl.SetTextureWrap(Active_Font[i].texture, rl.TextureWrap.CLAMP)
-	}
-}
-
-// compute_cell_metrics defines the grid from the layout face (Regular) ONLY.
-// Cell_W comes from SPACE advance; Cell_H comes from font.baseSize.
-compute_cell_metrics :: proc() {
-	font := Active_Font[0]
-
-	space := rune(' ')
-	idx := rl.GetGlyphIndex(font, space)
-	g := font.glyphs[idx]
-
-	cell_w := cast(i32)(g.advanceX)
-
-	// If advance is missing, fall back to a width derived from glyph image/rec.
-	// (Shouldn't happen in sane monospace fonts, but prevents Cell_W=0.)
-	if cell_w <= 0 {
-		w := cast(i32)(g.image.width)
-		if w <= 0 {
-			rec := font.recs[idx]
-			w = cast(i32)(rec.width)
-		}
-		if w <= 0 {
-			w = 1
-		}
-		cell_w = w
-	}
-
-	Cell_W = cell_w
-	Cell_H = cast(i32)(font.baseSize)
-
-	// No global alignment hacks in this contract.
-	Cell_Shift_X = 0
-	Cell_Shift_Y = 0
-}
 
 // validate_monospace_contract logs (only) suspicious monospace issues:
 // - advance != Cell_W for advancing glyphs

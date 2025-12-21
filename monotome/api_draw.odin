@@ -11,7 +11,7 @@ package main
 // - face is a direct choice (Lua 1..4 -> host 0..3). No gating, no fallback magic.
 //
 // Notes:
-// - Uses global Cell_W/Cell_H, Font_Px, and Active_Font[] owned by the host.
+// - Uses global Cell_W/Cell_H, Font_Size, and Active_Font[] owned by the host.
 // - draw.glyph draws only the first UTF-8 codepoint from `text`.
 // - draw.cell fills a single cell rectangle (background fill).
 
@@ -34,6 +34,8 @@ register_draw_api :: proc(L: ^lua.State) {
 	lua.pushcfunction(L, lua_draw_rect)  ; lua.setfield(L, -2, cstring("rect"))
 	lua.pushcfunction(L, lua_draw_text)  ; lua.setfield(L, -2, cstring("text"))
 
+	// draw.set_box_draw_mode("native"|"font")
+	lua.pushcfunction(L, lua_draw_set_box_draw_mode) ; lua.setfield(L, -2, cstring("set_box_draw_mode"))
 }
 
 // -----------------------------------------------------------------------------
@@ -90,22 +92,26 @@ grid_cols_rows :: proc "contextless" () -> (cols, rows: i32) {
 // Host draw primitive (shared core)
 // -----------------------------------------------------------------------------
 
-// draw_line_cell draws the single-line box drawing UI glyphs using rect geometry.
-// Returns true if it handled `codepoint`, else false.
-//
-// Glyphs handled (11):
-// ─│┌┐└┘├┤┬┴┼
-//
 // Thickness:
 // t = clamp(1, min(Cell_W, Cell_H)/8, 4)
-BOX_STROKE_DIV: i32 = 5
-BOX_STROKE_MAX: i32 = 4
+// NOTE: higher divisor => thinner lines.
+BOX_STROKE_DIV: i32 = 6
+BOX_STROKE_MAX: i32 = 3
 
 // When centering isn't representable (odd/even mismatch), snap by 1px.
 // 0 = bias left/up, 1 = bias right/down.
 BOX_CENTER_BIAS_X: i32 = 0
 BOX_CENTER_BIAS_Y: i32 = 0
 
+// Box drawing render policy for the 11 UI glyphs (─│┌┐└┘├┤┬┴┼):
+// 0 = "native" (rect geometry via draw_line_cell)
+// 1 = "font"   (render the glyph from the current font)
+Box_Draw_Mode: i32 = 0
+// draw_line_cell draws the single-line box drawing UI glyphs using rect geometry.
+// Returns true if it handled `codepoint`, else false.
+//
+// Glyphs handled (11):
+// ─│┌┐└┘├┤┬┴┼
 draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Color) -> bool {
 	// Direction bits: N=1, E=2, S=4, W=8
 	N: u8 = 1
@@ -197,12 +203,11 @@ draw_line_cell :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Colo
 	return true
 }
 
-
 // draw_glyph draws exactly one codepoint into a single cell at (x,y).
 // Policy:
 // - fixed grid (Cell_W/Cell_H)
 // - grid bounds check only
-// - box drawing UI glyphs are engine-drawn geometry (no font involvement)
+// - box drawing UI glyphs are engine-drawn geometry when Box_Draw_Mode=="native"
 // - face is a direct choice (0..3); no gating, no fallback
 draw_glyph :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Color, requested_face: i32) {
 	cols, rows := grid_cols_rows()
@@ -219,8 +224,11 @@ draw_glyph :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Color, r
 	}
 
 	// Engine-drawn box drawing (deterministic, font-independent).
-	if draw_line_cell(x, y, codepoint, color) {
-		return
+	// If mode is "font", skip this and let the font render the glyph.
+	if Box_Draw_Mode == 0 {
+		if draw_line_cell(x, y, codepoint, color) {
+			return
+		}
 	}
 
 	// Clamp face to 0..3.
@@ -235,8 +243,6 @@ draw_glyph :: proc "contextless" (x, y: i32, codepoint: rune, color: rl.Color, r
 
 	rl.DrawTextCodepoint(Active_Font[face], codepoint, pos, cast(f32)(Font_Size), color)
 }
-
-
 
 // -----------------------------------------------------------------------------
 // Lua API
@@ -267,7 +273,6 @@ lua_draw_cell :: proc "c" (L: ^lua.State) -> c.int {
 
 // draw.rect(x, y, w, h, {r,g,b,a})
 // Draws a filled rectangle in *cell space* (converted to pixels internally).
-// Clamps in cell space to the drawable grid.
 lua_draw_rect :: proc "c" (L: ^lua.State) -> c.int {
 	x := cast(i32)(lua.L_checkinteger(L, 1))
 	y := cast(i32)(lua.L_checkinteger(L, 2))
@@ -275,34 +280,61 @@ lua_draw_rect :: proc "c" (L: ^lua.State) -> c.int {
 	h := cast(i32)(lua.L_checkinteger(L, 4))
 	color := read_rgba_table(L, 5)
 
-	cols, rows := grid_cols_rows()
-
-	x0 := x
-	y0 := y
-	x1 := x + w
-	y1 := y + h
-
-	if x0 < 0    { x0 = 0 }
-	if y0 < 0    { y0 = 0 }
-	if x1 > cols { x1 = cols }
-	if y1 > rows { y1 = rows }
-
-	if x0 >= x1 || y0 >= y1 {
+	if w <= 0 || h <= 0 {
 		return 0
 	}
 
-	rl.DrawRectangle(x0 * Cell_W, y0 * Cell_H, (x1 - x0) * Cell_W, (y1 - y0) * Cell_H, color)
+	cols, rows := grid_cols_rows()
+
+	// Reject fully out-of-bounds.
+	if x >= cols || y >= rows || (x + w) <= 0 || (y + h) <= 0 {
+		return 0
+	}
+
+	// Clamp in cell space.
+	if x < 0 { w += x ; x = 0 }
+	if y < 0 { h += y ; y = 0 }
+	if x + w > cols { w = cols - x }
+	if y + h > rows { h = rows - y }
+
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+
+	rl.DrawRectangle(x * Cell_W, y * Cell_H, w * Cell_W, h * Cell_H, color)
 	return 0
+}
+
+// draw.set_box_draw_mode(mode)
+//
+// mode:
+// - "native": draw the 11 UI box glyphs using rect geometry
+// - "font":   draw those glyphs using the current font face
+lua_draw_set_box_draw_mode :: proc "c" (L: ^lua.State) -> c.int {
+	context = runtime.default_context()
+	mode_len: c.size_t
+	mode_c := lua.L_checklstring(L, 1, &mode_len)
+	mode := strings.string_from_ptr(cast(^u8)mode_c, int(mode_len))
+
+	if mode == "native" {
+		Box_Draw_Mode = 0
+		return 0
+	}
+	if mode == "font" {
+		Box_Draw_Mode = 1
+		return 0
+	}
+
+	return lua.L_error(L, cstring("draw.set_box_draw_mode: expected \"native\" or \"font\" (got \"%s\")"), mode_c)
 }
 
 // draw.text(x, y, text, {r,g,b,a}, face?)
 // Renders UTF-8 text horizontally, one codepoint per grid cell.
-// Single-line primitive: stops at '\n'.
-// face: Lua 1..4. Defaults to 1 (Regular).
+// Stops at newline.
 lua_draw_text :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
-	x := cast(i32)(lua.L_checkinteger(L, 1))
+	start_x := cast(i32)(lua.L_checkinteger(L, 1))
 	y := cast(i32)(lua.L_checkinteger(L, 2))
 
 	text_len: c.size_t
@@ -314,11 +346,14 @@ lua_draw_text :: proc "c" (L: ^lua.State) -> c.int {
 	face := i32(0)
 	if lua.gettop(L) >= 5 && !lua.isnil(L, 5) {
 		lua_face := cast(i32)(lua.L_checkinteger(L, 5))
-		if lua_face < 1 || lua_face > 4 {
-			return lua.L_error(L, cstring("draw.textOLD: face out of range (expected 1..4, got %d)"), lua_face)
+		if lua_face >= 1 && lua_face <= 4 {
+			face = lua_face - 1
+		} else {
+			face = 0
 		}
-		face = lua_face - 1
 	}
+
+	x := start_x
 
 	s := strings.string_from_ptr(cast(^u8)text_c, int(text_len))
 	for cp in s {
@@ -328,6 +363,7 @@ lua_draw_text :: proc "c" (L: ^lua.State) -> c.int {
 		}
 
 		draw_glyph(x, y, cp, color, face)
+
 		x += 1
 	}
 
@@ -335,8 +371,6 @@ lua_draw_text :: proc "c" (L: ^lua.State) -> c.int {
 }
 
 
-
-// draw.text_span(x, y, text, {r,g,b,a} [, face])
 //
 // Span renderer: one raylib DrawTextEx call.
 // - cell-space origin (x,y) -> pixel-space via (Cell_W/Cell_H)
@@ -399,7 +433,7 @@ lua_draw_text_span :: proc "c" (L: ^lua.State) -> c.int {
 		Active_Font[face],
 		s_c,
 		pos,
-		cast(f32)(Font_Size),
+		cast(f32)(Font_Size_Active),
 		0.0,  // spacing (0 keeps mono feel)
 		color,
 	)

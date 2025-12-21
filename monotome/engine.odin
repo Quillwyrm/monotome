@@ -21,7 +21,6 @@ import "core:c"
 // Lua globals + API binding
 // -----------------------------------------------------------------------------
 
-
 push_lua_module :: proc(L: ^lua.State, module_name: cstring) {
 	// Stack on entry: [module_table]
 	lua.getglobal(L, cstring("package"))         // [module_table, package]
@@ -62,7 +61,6 @@ register_lua_api :: proc(L: ^lua.State) {
 	push_lua_module(L, cstring("monotome"))
 }
 
-
 // -----------------------------------------------------------------------------
 // Lua errors + call helpers
 // -----------------------------------------------------------------------------
@@ -96,7 +94,6 @@ call_lua_noargs :: proc(L: ^lua.State, fn: cstring) -> bool {
 	return ok
 }
 
-
 call_lua_number :: proc(L: ^lua.State, fn: cstring, x: f64) -> bool {
 	lua.pushcfunction(L, lua_traceback)
 	errfunc := lua.gettop(L)
@@ -120,7 +117,6 @@ call_lua_number :: proc(L: ^lua.State, fn: cstring, x: f64) -> bool {
 	return ok
 }
 
-
 // -----------------------------------------------------------------------------
 // main
 // -----------------------------------------------------------------------------
@@ -137,11 +133,7 @@ main :: proc() {
 
 	register_lua_api(L)
 
-	init_font_paths_defaults()
-
 	rl.SetTraceLogLevel(rl.TraceLogLevel.ERROR)
-
-
 
 	exe_dir := filepath.dir(os.args[0])
 	main_path, err := filepath.join([]string{exe_dir, "main.lua"})
@@ -168,14 +160,13 @@ main :: proc() {
 	// -------------------------------------------------------------------------
 	// Font + cell metrics (needs window)
 	// -------------------------------------------------------------------------
-	ensure_fonts_loaded()
-	defer unload_active_fonts()
+	apply_pending_font_changes()
+	defer font_shutdown()
 
 	// -------------------------------------------------------------------------
 	// Main loop
 	// -------------------------------------------------------------------------
 	for !rl.WindowShouldClose() {
-
 
 		// last-frame delta (seconds)
 		dt_s := cast(f64)(rl.GetFrameTime())
@@ -187,6 +178,9 @@ main :: proc() {
 		if !call_lua_number(L, cstring("update"), dt_s) {
 			break
 		}
+
+		// Commit any font changes requested during update() before drawing.
+		apply_pending_font_changes()
 
 		// --- Lua draw ---
 		rl.BeginDrawing()

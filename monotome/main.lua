@@ -1,27 +1,36 @@
 local monotome = require("monotome")
 
-local draw   = monotome.draw
-local window = monotome.window
-local input  = monotome.input
-local font   = monotome.font
-local runtime = monotome.runtime
+local draw     = monotome.draw
+local window   = monotome.window
+local input    = monotome.input
+local font     = monotome.font
+local runtime  = monotome.runtime
 
 
 local C = {
-	bg     = {15, 12, 21, 255},  panel  = {16, 22, 30, 255},
-	border = {99, 123, 146, 255}, text   = {210, 214, 210, 255},
-	muted  = {140, 150, 165, 255}, accent = {24, 110, 116, 255},
-	ok     = {70, 220, 150, 255},  warn   = {191, 132, 98, 255}, hot = {255, 120, 200, 255},
+	bg = { 15, 12, 21, 255 },
+	panel = { 16, 22, 30, 255 },
+	border = { 99, 123, 146, 255 },
+	text = { 210, 214, 210, 255 },
+	muted = { 140, 150, 165, 255 },
+	accent = { 24, 110, 116, 255 },
+	ok = { 70, 220, 150, 255 },
+	warn = { 191, 132, 98, 255 },
+	hot = { 255, 120, 200, 255 },
 
 	-- cursor overlay (cell-space)
-	cursor_fill = {255, 255, 255, 36},
-	cursor_line = {255, 255, 255, 12},
-	cursor_tip_bg = {16, 22, 30, 220},
+	cursor_fill = { 255, 255, 255, 36 },
+	cursor_line = { 255, 255, 255, 12 },
+	cursor_tip_bg = { 16, 22, 30, 220 },
 }
 
 local S = {
-	t = 0, font_pt = 20, ax = 15, ay = 12,
-	typed = "", pulses = {},
+	t = 0,
+	font_pt = 18,
+	ax = 15,
+	ay = 12,
+	typed = "",
+	pulses = {},
 	undec = false,
 	test_face = 1,
 
@@ -111,12 +120,17 @@ local function cursor_overlay(cols, rows, world_x0, world_w)
 	draw.rect(tx, ty, tw, 1, C.cursor_tip_bg)
 	draw.text(tx + 1, ty, tip, C.text)
 end
-
+----------------------------------------
+-- INIT
+----------------------------------------
 function runtime.init()
-	window.init(1200, 900, "monotome testbed", {"vsync_on", "resizable"})
+	window.init(1200, 900, "monotome testbed", { "vsync_on", "resizable" })
 	font.init(S.font_pt)
 end
 
+----------------------------------------
+-- UPDATE
+----------------------------------------
 function runtime.update(dt)
 	S.t = S.t + dt
 	for k, v in pairs(S.pulses) do
@@ -142,6 +156,9 @@ function runtime.update(dt)
 	if input.key_pressed("tab") then S.show_cursor = not S.show_cursor end
 end
 
+----------------------------------------
+-- DRAW
+----------------------------------------
 function runtime.draw()
 	local cols, rows = window.grid_size()
 	local m = window.metrics()
@@ -154,11 +171,17 @@ function runtime.draw()
 
 	local cur_y = 3
 	draw.text(2, cur_y, "FONT:", C.muted)
-	if btn(8, cur_y, " - ") then S.font_pt = math.max(8, S.font_pt - 1); font.set_size(S.font_pt) end
-	if btn(13, cur_y, " + ") then S.font_pt = S.font_pt + 1; font.set_size(S.font_pt) end
+	if btn(8, cur_y, " - ") then
+		S.font_pt = math.max(8, S.font_pt - 1); font.set_size(S.font_pt)
+	end
+	if btn(13, cur_y, " + ") then
+		S.font_pt = S.font_pt + 1; font.set_size(S.font_pt)
+	end
 	draw.text(18, cur_y, tostring(S.font_pt) .. "px", C.text); cur_y = cur_y + 2
 
-	if btn(2, cur_y, " DECOR ", not S.undec) then S.undec = not S.undec; window.set_undecorated(S.undec) end
+	if btn(2, cur_y, " DECOR ", not S.undec) then
+		S.undec = not S.undec; window.set_undecorated(S.undec)
+	end
 	if btn(11, cur_y, " MIN ") then window.minimize() end
 	if btn(18, cur_y, " MAX ") then window.maximize() end; cur_y = cur_y + 2
 
@@ -176,11 +199,11 @@ function runtime.draw()
 
 	header(1, cur_y, 34, "Input Monitor")
 	cur_y = cur_y + 2
-	local keys = {{"W","w"},{"A","a"},{"S","s"},{"D","d"},{"SPC","space"},{"ENT","enter"},{"BS","backspace"},{"ESC","esc"}}
+	local keys = { { "W", "w" }, { "A", "a" }, { "S", "s" }, { "D", "d" }, { "SPC", "space" }, { "ENT", "enter" }, { "BS", "backspace" }, { "ESC", "esc" } }
 	for i, k in ipairs(keys) do
-		local r_idx = math.floor((i-1)/2)
-		local c_idx = (i-1)%2
-		input_monitor(2 + (c_idx*16), cur_y + r_idx, k[1], k[2])
+		local r_idx = math.floor((i - 1) / 2)
+		local c_idx = (i - 1) % 2
+		input_monitor(2 + (c_idx * 16), cur_y + r_idx, k[1], k[2])
 	end
 	cur_y = cur_y + 5
 	input_monitor(2, cur_y, "M1", "left", true)
@@ -188,9 +211,9 @@ function runtime.draw()
 
 	header(1, cur_y, 34, "Glyph Lab")
 	cur_y = cur_y + 2
-	local faces = {"REG", "BOLD", "ITAL", "BI"}
+	local faces = { "REG", "BOLD", "ITAL", "BI" }
 	for i, name in ipairs(faces) do
-		if btn(2 + ((i-1)*8), cur_y, name, S.test_face == i) then S.test_face = i end
+		if btn(2 + ((i - 1) * 8), cur_y, name, S.test_face == i) then S.test_face = i end
 	end
 	cur_y = cur_y + 2
 	draw.text(2, cur_y, "ABC abc 123 !@# Ω≈ç√ ∫µ≤≥", C.text, S.test_face)
