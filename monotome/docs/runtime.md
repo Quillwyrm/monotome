@@ -29,6 +29,7 @@ monotome.runtime.draw = function()
   draw.text(10, 10, "Hello World", {255, 255, 255, 255})
 end
 ```
+
 ---
 
 ## monotome.runtime.init
@@ -45,6 +46,7 @@ None.
 
 ### Returns
 None.
+
 ---
 
 ## monotome.runtime.update
@@ -60,6 +62,7 @@ monotome.runtime.update = function(dt)
 
 ### Returns
 None.
+
 ---
 
 ## monotome.runtime.draw

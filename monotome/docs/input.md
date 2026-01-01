@@ -28,6 +28,7 @@ is_down = monotome.input.down(key)
 
 ### Returns
 - `boolean: is_down` - `true` if the key is held, `false` otherwise.
+
 ---
 
 ## monotome.input.pressed
@@ -43,6 +44,7 @@ was_pressed = monotome.input.pressed(key)
 
 ### Returns
 - `boolean: was_pressed` - `true` if the key was pressed since the last frame.
+
 ---
 
 ## monotome.input.released
@@ -58,6 +60,7 @@ was_released = monotome.input.released(key)
 
 ### Returns
 - `boolean: was_released` - `true` if the key was released since the last frame.
+
 ---
 
 ## monotome.input.repeated
@@ -73,6 +76,7 @@ is_repeat = monotome.input.repeated(key)
 
 ### Returns
 - `boolean: is_repeat` - `true` if the key triggered a repeat event this frame.
+
 ---
 
 ## monotome.input.mouse_position
@@ -89,6 +93,7 @@ None.
 ### Returns
 - `number: col` - The column index under the mouse (integers, may be negative or OOB).
 - `number: row` - The row index under the mouse.
+
 ---
 
 ## monotome.input.mouse_wheel
@@ -120,6 +125,7 @@ None.
 
 ### Returns
 None.
+
 ---
 
 ## monotome.input.stop_text
@@ -135,6 +141,7 @@ None.
 
 ### Returns
 None.
+
 ---
 
 ## monotome.input.text

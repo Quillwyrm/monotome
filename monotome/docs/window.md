@@ -1,5 +1,6 @@
 # monotome.window
 The windowing API for Monotome, handling the main display context, sizing, and positioning.
+
 ---
 
 ## monotome.window.init
@@ -18,6 +19,7 @@ monotome.window.init(width, height, title, flags?)
 
 ### Returns
 None.
+
 ---
 
 ## monotome.window.width
@@ -33,6 +35,7 @@ None.
 
 ### Returns
 - `number: width` - The width of the window in pixels.
+
 ---
 
 ## monotome.window.height
@@ -48,6 +51,7 @@ None.
 
 ### Returns
 - `number: height` - The height of the window in pixels.
+
 ---
 
 ## monotome.window.columns
@@ -63,6 +67,7 @@ None.
 
 ### Returns
 - `number: cols` - The number of text columns that fit in the window.
+
 ---
 
 ## monotome.window.rows
@@ -78,6 +83,7 @@ None.
 
 ### Returns
 - `number: rows` - The number of text rows that fit in the window.
+
 ---
 
 ## monotome.window.pos_x
@@ -93,6 +99,7 @@ None.
 
 ### Returns
 - `number: x` - The X coordinate of the window's top-left corner.
+
 ---
 
 ## monotome.window.pos_y
@@ -108,6 +115,7 @@ None.
 
 ### Returns
 - `number: y` - The Y coordinate of the window's top-left corner.
+
 ---
 
 ## monotome.window.set_title
@@ -123,6 +131,7 @@ monotome.window.set_title(title)
 
 ### Returns
 None.
+
 ---
 
 ## monotome.window.set_size
@@ -139,6 +148,7 @@ monotome.window.set_size(width, height)
 
 ### Returns
 None.
+
 ---
 
 ## monotome.window.set_position
@@ -155,6 +165,7 @@ monotome.window.set_position(x, y)
 
 ### Returns
 None.
+
 ---
 
 ## monotome.window.maximize
@@ -170,6 +181,7 @@ None.
 
 ### Returns
 None.
+
 ---
 
 ## monotome.window.minimize

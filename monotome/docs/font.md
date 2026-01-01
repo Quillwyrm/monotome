@@ -1,5 +1,6 @@
 # monotome.font
 The font management API, handling typeface loading and sizing.
+
 ---
 
 ## monotome.font.init
@@ -16,6 +17,7 @@ monotome.font.init(size, paths)
 
 ### Returns
 None.
+
 ---
 
 ## monotome.font.load
@@ -31,6 +33,7 @@ monotome.font.load(paths)
 
 ### Returns
 None.
+
 ---
 
 ## monotome.font.set_size
@@ -46,6 +49,7 @@ monotome.font.set_size(size)
 
 ### Returns
 None.
+
 ---
 
 ## monotome.font.size
@@ -61,6 +65,7 @@ None.
 
 ### Returns
 - `number: size` - The current font size in pixels.
+
 ---
 
 ## monotome.font.paths
