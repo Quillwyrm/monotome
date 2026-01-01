@@ -40,6 +40,7 @@ monotome.draw.text(x, y, text, color, face?)
 - `number: face` - Optional font face index (1-4). Defaults to 1.
 
 ### Returns
+
 None.
 ---
 
