@@ -1,6 +1,6 @@
 ![monotome](logo.png)
 
-**Monotome** is a **Lua-scriptable textmode rendering engine** written in *Odin*, built on *raylib*.
+**Monotome** is a **Lua-scriptable textmode rendering engine** written in *Odin*.
 
 **Write Lua, draw glyphs, ship little tools.**
 
