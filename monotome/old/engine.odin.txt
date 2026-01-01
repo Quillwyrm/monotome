@@ -16,6 +16,8 @@ import "core:fmt"
 import "core:strings"
 import "core:path/filepath"
 import "core:c"
+import sdl "vendor:sdl3"
+import ttf "vendor:sdl3/ttf"
 
 // -----------------------------------------------------------------------------
 // Lua globals + API binding
@@ -117,6 +119,7 @@ call_lua_number :: proc(L: ^lua.State, fn: cstring, x: f64) -> bool {
 	return ok
 }
 
+
 // -----------------------------------------------------------------------------
 // main
 // -----------------------------------------------------------------------------
@@ -124,6 +127,7 @@ call_lua_number :: proc(L: ^lua.State, fn: cstring, x: f64) -> bool {
 // main boots Lua, loads main.lua, calls init_terminal(), loads fonts/cell metrics,
 // then runs the update/draw loop (including input_begin_frame() once per frame).
 main :: proc() {
+
 	// -------------------------------------------------------------------------
 	// Lua state + script load
 	// -------------------------------------------------------------------------
@@ -162,6 +166,8 @@ main :: proc() {
 	// -------------------------------------------------------------------------
 	apply_pending_font_changes()
 	defer font_shutdown()
+	
+
 
 	// -------------------------------------------------------------------------
 	// Main loop

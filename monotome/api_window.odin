@@ -1,513 +1,342 @@
 package main
 
-// api_window.odin
-//
-// window.* Lua API (single-window, desktop), backed by raylib.
-//
-// Intent:
-// - Flat, direct mapping to raylib window/cursor calls.
-// - No extra state tracked in the engine (mode is derived from raylib state).
-// - Fail-fast on wrong argument types (Lua checks); unknown flag/mode tokens raise Lua errors.
-//
-// opts (init) is a flat array of strings:
-//   window.init(w, h, title, { "vsync_on", "resizable", ... })
-//
-// Supported opts tokens (others are errors):
-// - "vsync_on"            -> VSYNC_HINT
-// - "fullscreen_mode"     -> FULLSCREEN_MODE
-// - "resizable"           -> WINDOW_RESIZABLE
-// - "undecorated"         -> WINDOW_UNDECORATED
-// - "hidden"              -> WINDOW_HIDDEN
-// - "minimized"           -> WINDOW_MINIMIZED
-// - "maximized"           -> WINDOW_MAXIMIZED
-// - "unfocused"           -> WINDOW_UNFOCUSED
-// - "topmost"             -> WINDOW_TOPMOST
-// - "mouse_passthrough"   -> WINDOW_MOUSE_PASSTHROUGH
-// - "borderless_windowed" -> BORDERLESS_WINDOWED_MODE
-
-import "core:c"
-import "core:strings"
 import "base:runtime"
+import "core:c"
+import "core:fmt"
+import "core:strings"
 import lua "luajit"
-import rl  "vendor:raylib"
+import sdl "vendor:sdl3"
 
-// -----------------------------------------------------------------------------
-// Registration
-// -----------------------------------------------------------------------------
+//========================================================================================================================================
+// WINDOW API 
+// Lua exposed API for handling sdl windowing (monotome.window.*)
+//========================================================================================================================================
 
-// register_window_api creates the global Lua table `window` and installs all functions.
-register_window_api :: proc(L: ^lua.State) {
-	lua.newtable(L)
+// read_window_flags parses {"fullscreen","borderless","resizable"} into three booleans.
+read_window_flags :: proc(L: ^lua.State, idx: lua.Index) -> (fullscreen, borderless, resizable: bool) {
+	lua.L_checktype(L, cast(c.int)(idx), lua.Type.TABLE)
 
-	// core
-	lua.pushcfunction(L, lua_window_init)     ; lua.setfield(L, -2, cstring("init"))
-	lua.pushcfunction(L, lua_window_close)    ; lua.setfield(L, -2, cstring("close"))
-	lua.pushcfunction(L, lua_window_maximize) ; lua.setfield(L, -2, cstring("maximize"))
-	lua.pushcfunction(L, lua_window_minimize) ; lua.setfield(L, -2, cstring("minimize"))
-	lua.pushcfunction(L, lua_window_restore)  ; lua.setfield(L, -2, cstring("restore"))
+	i: lua.Integer = 1
+	for {
+		lua.rawgeti(L, idx, i) // push flags[i]
 
-	// setters
-	lua.pushcfunction(L, lua_window_set_title)         ; lua.setfield(L, -2, cstring("set_title"))
-	lua.pushcfunction(L, lua_window_set_size)          ; lua.setfield(L, -2, cstring("set_size"))
-	lua.pushcfunction(L, lua_window_set_min_size)      ; lua.setfield(L, -2, cstring("set_min_size"))
-	lua.pushcfunction(L, lua_window_set_max_size)      ; lua.setfield(L, -2, cstring("set_max_size"))
-	lua.pushcfunction(L, lua_window_set_position)      ; lua.setfield(L, -2, cstring("set_position"))
-	lua.pushcfunction(L, lua_window_set_fps_limit)     ; lua.setfield(L, -2, cstring("set_fps_limit"))
-	lua.pushcfunction(L, lua_window_set_vsync)         ; lua.setfield(L, -2, cstring("set_vsync"))
-	lua.pushcfunction(L, lua_window_set_resizable)     ; lua.setfield(L, -2, cstring("set_resizable"))
-	lua.pushcfunction(L, lua_window_set_mode)          ; lua.setfield(L, -2, cstring("set_mode"))
-	lua.pushcfunction(L, lua_window_set_undecorated)   ; lua.setfield(L, -2, cstring("set_undecorated"))
-	lua.pushcfunction(L, lua_window_set_mouse_cursor) ; lua.setfield(L, -2, cstring("set_mouse_cursor"))
-	lua.pushcfunction(L, lua_window_set_cursor_hidden) ; lua.setfield(L, -2, cstring("set_cursor_hidden"))
-	
-
-	// info
-	lua.pushcfunction(L, lua_window_render_size) ; lua.setfield(L, -2, cstring("render_size"))
-	lua.pushcfunction(L, lua_window_position)   ; lua.setfield(L, -2, cstring("position"))
-	lua.pushcfunction(L, lua_window_monitor)    ; lua.setfield(L, -2, cstring("monitor"))
-	lua.pushcfunction(L, lua_window_mode)       ; lua.setfield(L, -2, cstring("mode"))
-
-	// cell-space geometry
-	lua.pushcfunction(L, lua_window_cell_size)  ; lua.setfield(L, -2, cstring("cell_size"))
-	lua.pushcfunction(L, lua_window_grid_size)  ; lua.setfield(L, -2, cstring("grid_size"))
-
-	// snapshot table for layout save/restore
-	lua.pushcfunction(L, lua_window_metrics)    ; lua.setfield(L, -2, cstring("metrics"))
-
-	// queries
-	lua.pushcfunction(L, lua_window_is_focused)          ; lua.setfield(L, -2, cstring("is_focused"))
-	lua.pushcfunction(L, lua_window_is_minimized)        ; lua.setfield(L, -2, cstring("is_minimized"))
-	lua.pushcfunction(L, lua_window_is_maximized)        ; lua.setfield(L, -2, cstring("is_maximized"))
-	lua.pushcfunction(L, lua_window_is_cursor_hidden)    ; lua.setfield(L, -2, cstring("is_cursor_hidden"))
-	lua.pushcfunction(L, lua_window_is_cursor_on_screen) ; lua.setfield(L, -2, cstring("is_cursor_on_screen"))
-	lua.pushcfunction(L, lua_window_should_close) ; lua.setfield(L, -2, cstring("should_close"))
-
-	// clipboard
-	lua.pushcfunction(L, lua_window_get_clipboard) ; lua.setfield(L, -2, cstring("get_clipboard"))
-	lua.pushcfunction(L, lua_window_set_clipboard) ; lua.setfield(L, -2, cstring("set_clipboard"))
-
-}
-
-// -----------------------------------------------------------------------------
-// Init opts -> raylib ConfigFlags
-// -----------------------------------------------------------------------------
-
-// window_config_flags_from_opts converts a Lua opts table into raylib ConfigFlags.
-// Table shape: { "vsync_on", "resizable", ... } (1-based array part).
-window_config_flags_from_opts :: proc "contextless" (L: ^lua.State, idx: c.int) -> rl.ConfigFlags {
-	context = runtime.default_context()
-	flags := rl.ConfigFlags{}
-	tidx := lua.Index(idx)
-
-	// opts is a flat array table: { "vsync_on", "resizable", ... }
-	// FAIL-FAST: each element must be a Lua string, or Lua throws.
-	n := int(lua.objlen(L, tidx))
-	for i in 1..=n {
-		lua.rawgeti(L, tidx, lua.Integer(i))
+		t := lua.type(L, -1)
+		if t == lua.Type.NIL {
+			lua.pop(L, 1)
+			break
+		}
 
 		len: c.size_t
 		p := lua.L_checklstring(L, -1, &len)
+		s := strings.string_from_ptr(cast(^u8)(p), int(len))
 
-		// Non-alloc string view for comparisons.
-		opt  := strings.string_from_ptr(cast(^u8) p, int(len))
-
-
-		if opt == "vsync_on" {
-			flags |= rl.ConfigFlags{.VSYNC_HINT}
-		} else if opt == "fullscreen_mode" {
-			flags |= rl.ConfigFlags{.FULLSCREEN_MODE}
-		} else if opt == "resizable" {
-			flags |= rl.ConfigFlags{.WINDOW_RESIZABLE}
-		} else if opt == "undecorated" {
-			flags |= rl.ConfigFlags{.WINDOW_UNDECORATED}
-		} else if opt == "hidden" {
-			flags |= rl.ConfigFlags{.WINDOW_HIDDEN}
-		} else if opt == "minimized" {
-			flags |= rl.ConfigFlags{.WINDOW_MINIMIZED}
-		} else if opt == "maximized" {
-			flags |= rl.ConfigFlags{.WINDOW_MAXIMIZED}
-		} else if opt == "unfocused" {
-			flags |= rl.ConfigFlags{.WINDOW_UNFOCUSED}
-		} else if opt == "topmost" {
-			flags |= rl.ConfigFlags{.WINDOW_TOPMOST}
-		} else if opt == "mouse_passthrough" {
-			flags |= rl.ConfigFlags{.WINDOW_MOUSE_PASSTHROUGH}
-		} else if opt == "borderless_windowed" {
-			flags |= rl.ConfigFlags{.BORDERLESS_WINDOWED_MODE}
+		if s == "fullscreen" {
+			fullscreen = true
+		} else if s == "borderless" {
+			borderless = true
+		} else if s == "resizable" {
+			resizable = true
 		} else {
-			// fail-fast on typos
-			lua.L_error(L, cstring("window.init: unknown opt '%.*s'"), int(len), p)
+			lua.L_error(L, cstring("window.init: unknown flag"))
 		}
 
 		lua.pop(L, 1)
+		i += 1
 	}
 
-	return flags
+	return
 }
 
-// -----------------------------------------------------------------------------
-// Core
-// -----------------------------------------------------------------------------
+// apply_window_flags applies fullscreen/borderless/resizable via SDL setters.
+apply_window_flags :: proc "contextless" (fullscreen, borderless, resizable: bool) {
+	if Window == nil {
+		return
+	}
 
-// window.init(w, h, title, opts?) -> creates the window (opts applied via SetConfigFlags before InitWindow).
+	// Fullscreen on/off.
+	sdl.SetWindowFullscreen(Window, fullscreen)
+
+	// Borderless toggle (borderless == true → bordered = false).
+	sdl.SetWindowBordered(Window, !borderless)
+
+	// Resizable toggle.
+	sdl.SetWindowResizable(Window, resizable)
+}
+
+// lua_window_init implements window.init(width, height, title, flags?).
 lua_window_init :: proc "c" (L: ^lua.State) -> c.int {
-	w := c.int(int(lua.L_checkinteger(L, 1)))
-	h := c.int(int(lua.L_checkinteger(L, 2)))
-	title := lua.L_checklstring(L, 3, nil)
-
-	// Optional opts table at arg 4; if not a table we do nothing.
-	if int(lua.gettop(L)) >= 4 && lua.istable(L, 4) {
-		rl.SetConfigFlags(window_config_flags_from_opts(L, 4))
-	}
-
-	rl.InitWindow(w, h, title)
-	return 0
-}
-
-// window.close() -> CloseWindow().
-lua_window_close :: proc "c" (L: ^lua.State) -> c.int { rl.CloseWindow(); return 0 }
-lua_window_maximize :: proc "c" (L: ^lua.State) -> c.int { rl.MaximizeWindow(); return 0 }
-lua_window_minimize :: proc "c" (L: ^lua.State) -> c.int { rl.MinimizeWindow(); return 0 }
-lua_window_restore  :: proc "c" (L: ^lua.State) -> c.int { rl.RestoreWindow(); return 0 }
-
-
-//------------------------------------------------------------------------------
-// Setters
-//------------------------------------------------------------------------------
-
-// window.set_title(title) -> SetWindowTitle().
-lua_window_set_title :: proc "c" (L: ^lua.State) -> c.int {
-	title := lua.L_checklstring(L, 1, nil)
-	rl.SetWindowTitle(title)
-	return 0
-}
-
-// window.set_size(w, h) -> SetWindowSize().
-lua_window_set_size :: proc "c" (L: ^lua.State) -> c.int {
-	w := c.int(int(lua.L_checkinteger(L, 1)))
-	h := c.int(int(lua.L_checkinteger(L, 2)))
-	rl.SetWindowSize(w, h)
-	return 0
-}
-
-// window.set_min_size(w, h) -> SetWindowMinSize().
-lua_window_set_min_size :: proc "c" (L: ^lua.State) -> c.int {
-	w := c.int(int(lua.L_checkinteger(L, 1)))
-	h := c.int(int(lua.L_checkinteger(L, 2)))
-	rl.SetWindowMinSize(w, h)
-	return 0
-}
-
-// window.set_max_size(w, h) -> SetWindowMaxSize().
-lua_window_set_max_size :: proc "c" (L: ^lua.State) -> c.int {
-	w := c.int(int(lua.L_checkinteger(L, 1)))
-	h := c.int(int(lua.L_checkinteger(L, 2)))
-	rl.SetWindowMaxSize(w, h)
-	return 0
-}
-
-// window.set_position(x, y) -> SetWindowPosition().
-lua_window_set_position :: proc "c" (L: ^lua.State) -> c.int {
-	x := c.int(int(lua.L_checkinteger(L, 1)))
-	y := c.int(int(lua.L_checkinteger(L, 2)))
-	rl.SetWindowPosition(x, y)
-	return 0
-}
-
-// window.set_fps_limit(n) -> SetTargetFPS().
-lua_window_set_fps_limit :: proc "c" (L: ^lua.State) -> c.int {
-	fps := c.int(int(lua.L_checkinteger(L, 1)))
-	rl.SetTargetFPS(fps)
-	return 0
-}
-
-// window.set_vsync(bool) -> Set/Clear VSYNC_HINT window state.
-lua_window_set_vsync :: proc "c" (L: ^lua.State) -> c.int {
-	enable := lua.toboolean(L, 1) 
-	if enable {
-		rl.SetWindowState(rl.ConfigFlags{.VSYNC_HINT})
-	} else {
-		rl.ClearWindowState(rl.ConfigFlags{.VSYNC_HINT})
-	}
-	return 0
-}
-
-// window.set_resizable(bool) -> Set/Clear WINDOW_RESIZABLE window state.
-lua_window_set_resizable :: proc "c" (L: ^lua.State) -> c.int {
-	enable := lua.toboolean(L, 1) 
-	if enable {
-		rl.SetWindowState(rl.ConfigFlags{.WINDOW_RESIZABLE})
-	} else {
-		rl.ClearWindowState(rl.ConfigFlags{.WINDOW_RESIZABLE})
-	}
-	return 0
-}
-
-// window.set_mode(mode) -> sets exactly one of: "windowed" | "fullscreen" | "borderless_windowed".
-lua_window_set_mode :: proc "c" (L: ^lua.State) -> c.int {
+	// Provide a default context for any string helpers used here.
 	context = runtime.default_context()
-	mode_len: c.size_t
-	mode_c := lua.L_checklstring(L, 1, &mode_len)
 
-	// Non-alloc view for mode token comparisons.
-	mode := strings.string_from_ptr(cast(^u8) mode_c, int(mode_len))
-
-	want_windowed   := mode == "windowed"
-	want_fullscreen := mode == "fullscreen"
-	want_borderless := mode == "borderless_windowed"
-
-	if !want_windowed && !want_fullscreen && !want_borderless {
-		return lua.L_error(L, cstring("window.set_mode: unknown mode '%.*s'"), int(mode_len), mode_c)
-	}
-
-	is_fullscreen := rl.IsWindowFullscreen()
-	is_borderless := rl.IsWindowState(rl.ConfigFlags{.BORDERLESS_WINDOWED_MODE})
-
-	if want_windowed {
-		if is_fullscreen { rl.ToggleFullscreen() }
-		if is_borderless { rl.ToggleBorderlessWindowed() }
+	nargs := lua.gettop(L)
+	if nargs < 3 {
+		lua.L_error(L, cstring("window.init expects at least 3 arguments: width, height, title[, flags]"))
 		return 0
 	}
 
-	if want_fullscreen {
-		if is_borderless { rl.ToggleBorderlessWindowed() }
-		if !is_fullscreen { rl.ToggleFullscreen() }
+	if Window != nil || Renderer != nil {
+		lua.L_error(L, cstring("window.init: window already created"))
 		return 0
 	}
 
-	// want_borderless
-	if is_fullscreen { rl.ToggleFullscreen() }
-	if !is_borderless { rl.ToggleBorderlessWindowed() }
+	w := lua.L_checkinteger(L, 1)
+	h := lua.L_checkinteger(L, 2)
+
+	title_c := lua.L_checkstring(L, 3)
+
+	fullscreen, borderless, resizable: bool
+	if nargs >= 4 && lua.type(L, 4) == lua.Type.TABLE {
+		fullscreen, borderless, resizable = read_window_flags(L, lua.Index(4))
+	}
+
+	if !sdl.CreateWindowAndRenderer(
+		title_c,
+		cast(c.int)(w),
+		cast(c.int)(h),
+		{}, // initial flags; runtime toggles applied below
+		&Window,
+		&Renderer,
+	) {
+		fmt.eprintln("CreateWindowAndRenderer failed:", sdl.GetError())
+		lua.L_error(L, cstring("window.init: CreateWindowAndRenderer failed"))
+		return 0
+	}
+
+	apply_window_flags(fullscreen, borderless, resizable)
 	return 0
 }
 
-// window.set_undecorated(bool) -> Set/Clear WINDOW_UNDECORATED window state.
-lua_window_set_undecorated :: proc "c" (L: ^lua.State) -> c.int {
-	enable := lua.toboolean(L, 1) 
-	if enable {
-		rl.SetWindowState(rl.ConfigFlags{.WINDOW_UNDECORATED})
-	} else {
-		rl.ClearWindowState(rl.ConfigFlags{.WINDOW_UNDECORATED})
-	}
-	return 0
-}
-
-// window.set_mouse_cursor(tok)
-// tok is lowercase string, one of:
-// "default" | "arrow" | "ibeam" | "crosshair" | "pointing_hand" |
-// "resize_ew" | "resize_ns" | "resize_nwse" | "resize_nesw" | "resize_all" | "not_allowed"
-lua_window_set_mouse_cursor :: proc "c" (L: ^lua.State) -> c.int {
-	context = runtime.default_context()
-
-	n_sz: c.size_t
-	p := lua.L_checklstring(L, 1, &n_sz)
-	n := int(n_sz)
-
-	if n <= 0 {
-		return lua.L_error(L, cstring("window.set_mouse_cursor: empty token"))
+// lua_window_width implements window.width() -> width in pixels.
+lua_window_width :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.width: window not created"))
+		return 0
 	}
 
-	tok := strings.string_from_ptr(cast(^u8)p, n)
-
-	cursor: rl.MouseCursor
-	if tok == "default" {
-		cursor = .DEFAULT
-	} else if tok == "arrow" {
-		cursor = .ARROW
-	} else if tok == "ibeam" {
-		cursor = .IBEAM
-	} else if tok == "crosshair" {
-		cursor = .CROSSHAIR
-	} else if tok == "pointing_hand" {
-		cursor = .POINTING_HAND
-	} else if tok == "resize_ew" {
-		cursor = .RESIZE_EW
-	} else if tok == "resize_ns" {
-		cursor = .RESIZE_NS
-	} else if tok == "resize_nwse" {
-		cursor = .RESIZE_NWSE
-	} else if tok == "resize_nesw" {
-		cursor = .RESIZE_NESW
-	} else if tok == "resize_all" {
-		cursor = .RESIZE_ALL
-	} else if tok == "not_allowed" {
-		cursor = .NOT_ALLOWED
-	} else {
-		return lua.L_error(L, cstring("window.set_mouse_cursor: unknown cursor '%.*s'"), n, p)
+	w, h: c.int
+	if !sdl.GetWindowSize(Window, &w, &h) {
+		lua.L_error(L, cstring("window.width: GetWindowSize failed"))
+		return 0
 	}
 
-	rl.SetMouseCursor(cursor)
-	return 0
-}
-
-// window.set_cursor_hidden(bool) -> HideCursor/ShowCursor.
-lua_window_set_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
-	hide := lua.toboolean(L, 1) 
-	if hide {
-		rl.HideCursor()
-	} else {
-		rl.ShowCursor()
-	}
-	return 0
-}
-
-// window.set_clipboard(text) -> (raylib SetClipboardText)
-lua_window_set_clipboard :: proc "c" (L: ^lua.State) -> c.int {
-	text := lua.L_checklstring(L, 1, nil)
-	rl.SetClipboardText(text)
-	return 0
-}
-
-
-// window.get_clipboard() -> string (raylib GetClipboardText)
-lua_window_get_clipboard :: proc "c" (L: ^lua.State) -> c.int {
-	p := rl.GetClipboardText()
-	if p == nil {
-		lua.pushlstring(L, cstring(""), 0)
-		return 1
-	}
-	lua.pushstring(L, p)
+	lua.pushinteger(L, cast(lua.Integer)(w))
 	return 1
 }
 
-// -----------------------------------------------------------------------------
-// Info
-// -----------------------------------------------------------------------------
+// lua_window_height implements window.height() -> height in pixels.
+lua_window_height :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.height: window not created"))
+		return 0
+	}
 
-// window.render_size() -> render_w, render_h (raylib GetRenderWidth/Height).
-// Note: this is the render target size in pixels (not necessarily the same as screen size).
-lua_window_render_size :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushinteger(L, lua.Integer(rl.GetRenderWidth()))
-	lua.pushinteger(L, lua.Integer(rl.GetRenderHeight()))
-	return 2
-}
+	w, h: c.int
+	if !sdl.GetWindowSize(Window, &w, &h) {
+		lua.L_error(L, cstring("window.height: GetWindowSize failed"))
+		return 0
+	}
 
-// window.position() -> x, y (GetWindowPosition, integer).
-lua_window_position :: proc "c" (L: ^lua.State) -> c.int {
-	pos := rl.GetWindowPosition()
-	lua.pushinteger(L, lua.Integer(int(pos.x)))
-	lua.pushinteger(L, lua.Integer(int(pos.y)))
-	return 2
-}
-
-// window.monitor() -> idx (GetCurrentMonitor).
-lua_window_monitor :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushinteger(L, lua.Integer(rl.GetCurrentMonitor()))
+	lua.pushinteger(L, cast(lua.Integer)(h))
 	return 1
 }
 
-// window.mode() -> "windowed" | "fullscreen" | "borderless_windowed" (derived from raylib state).
-lua_window_mode :: proc "c" (L: ^lua.State) -> c.int {
-	if rl.IsWindowFullscreen() {
-		lua.pushstring(L, cstring("fullscreen"))
-		return 1
+// lua_window_columns implements window.columns() -> number of cell columns.
+lua_window_columns :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.columns: window not created"))
+		return 0
 	}
-	if rl.IsWindowState(rl.ConfigFlags{.BORDERLESS_WINDOWED_MODE}) {
-		lua.pushstring(L, cstring("borderless_windowed"))
-		return 1
-	}
-	lua.pushstring(L, cstring("windowed"))
-	return 1
-}
 
-// window.cell_size() -> cell_w, cell_h.
-// Cell metrics must be ready (computed after fonts are loaded).
-lua_window_cell_size :: proc "c" (L: ^lua.State) -> c.int {
-	if Cell_W <= 0 || Cell_H <= 0 {
-		return lua.L_error(L, cstring("window.cell_size: cell metrics not ready"))
+	if Cell_W <= 0 {
+		lua.L_error(L, cstring("window.columns: Cell_W not initialized"))
+		return 0
 	}
-	lua.pushinteger(L, cast(lua.Integer)(Cell_W))
-	lua.pushinteger(L, cast(lua.Integer)(Cell_H))
-	return 2
-}
 
-// window.grid_size() -> cols, rows.
-// Derived from render size and cell metrics.
-lua_window_grid_size :: proc "c" (L: ^lua.State) -> c.int {
-	if Cell_W <= 0 || Cell_H <= 0 {
-		return lua.L_error(L, cstring("window.grid_size: cell metrics not ready"))
+	w, h: c.int
+	if !sdl.GetWindowSize(Window, &w, &h) {
+		lua.L_error(L, cstring("window.columns: GetWindowSize failed"))
+		return 0
 	}
-	render_w := cast(i32)(rl.GetRenderWidth())
-	render_h := cast(i32)(rl.GetRenderHeight())
-	cols := render_w / Cell_W
-	rows := render_h / Cell_H
+
+	cols := int(f32(w) / Cell_W)
 	lua.pushinteger(L, cast(lua.Integer)(cols))
-	lua.pushinteger(L, cast(lua.Integer)(rows))
-	return 2
+	return 1
 }
 
-// window.metrics() -> table snapshot for layout save/restore.
-//
-// Returns:
-// { px_w, px_h, cols, rows, cell_w, cell_h, pos_x, pos_y, monitor }
-lua_window_metrics :: proc "c" (L: ^lua.State) -> c.int {
-	if Cell_W <= 0 || Cell_H <= 0 {
-		return lua.L_error(L, cstring("window.metrics: cell metrics not ready"))
+// lua_window_rows implements window.rows() -> number of cell rows.
+lua_window_rows :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.rows: window not created"))
+		return 0
 	}
 
-	px_w := rl.GetScreenWidth()
-	px_h := rl.GetScreenHeight()
+	if Cell_H <= 0 {
+		lua.L_error(L, cstring("window.rows: Cell_H not initialized"))
+		return 0
+	}
 
-	render_w := cast(i32)(rl.GetRenderWidth())
-	render_h := cast(i32)(rl.GetRenderHeight())
-	cols := render_w / Cell_W
-	rows := render_h / Cell_H
+	w, h: c.int
+	if !sdl.GetWindowSize(Window, &w, &h) {
+		lua.L_error(L, cstring("window.rows: GetWindowSize failed"))
+		return 0
+	}
 
-	pos := rl.GetWindowPosition()
-	mon := rl.GetCurrentMonitor()
-
-	lua.newtable(L)
-
-	lua.pushinteger(L, lua.Integer(px_w))           ; lua.setfield(L, -2, cstring("px_w"))
-	lua.pushinteger(L, lua.Integer(px_h))           ; lua.setfield(L, -2, cstring("px_h"))
-	lua.pushinteger(L, cast(lua.Integer)(cols))     ; lua.setfield(L, -2, cstring("cols"))
-	lua.pushinteger(L, cast(lua.Integer)(rows))     ; lua.setfield(L, -2, cstring("rows"))
-	lua.pushinteger(L, cast(lua.Integer)(Cell_W))   ; lua.setfield(L, -2, cstring("cell_w"))
-	lua.pushinteger(L, cast(lua.Integer)(Cell_H))   ; lua.setfield(L, -2, cstring("cell_h"))
-	lua.pushinteger(L, lua.Integer(int(pos.x)))     ; lua.setfield(L, -2, cstring("pos_x"))
-	lua.pushinteger(L, lua.Integer(int(pos.y)))     ; lua.setfield(L, -2, cstring("pos_y"))
-	lua.pushinteger(L, lua.Integer(mon))            ; lua.setfield(L, -2, cstring("monitor"))
-
+	rows := int(f32(h) / Cell_H)
+	lua.pushinteger(L, cast(lua.Integer)(rows))
 	return 1
 }
 
-// -----------------------------------------------------------------------------
-// Queries
-// -----------------------------------------------------------------------------
+// lua_window_pos_x implements window.pos_x() -> window x in pixels.
+lua_window_pos_x :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.pos_x: window not created"))
+		return 0
+	}
 
-// window.is_focused() -> IsWindowFocused().
-lua_window_is_focused :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushboolean(L, b32(rl.IsWindowFocused()))
+	x, y: c.int
+	if !sdl.GetWindowPosition(Window, &x, &y) {
+		lua.L_error(L, cstring("window.pos_x: GetWindowPosition failed"))
+		return 0
+	}
+
+	lua.pushinteger(L, cast(lua.Integer)(x))
 	return 1
 }
 
-// window.is_minimized() -> IsWindowMinimized().
-lua_window_is_minimized :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushboolean(L, b32(rl.IsWindowMinimized()))
+// lua_window_pos_y implements window.pos_y() -> window y in pixels.
+lua_window_pos_y :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.pos_y: window not created"))
+		return 0
+	}
+
+	x, y: c.int
+	if !sdl.GetWindowPosition(Window, &x, &y) {
+		lua.L_error(L, cstring("window.pos_y: GetWindowPosition failed"))
+		return 0
+	}
+
+	lua.pushinteger(L, cast(lua.Integer)(y))
 	return 1
 }
 
-// window.is_maximized() -> IsWindowMaximized().
-lua_window_is_maximized :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushboolean(L, b32(rl.IsWindowMaximized()))
-	return 1
+// lua_window_set_title implements window.set_title(title).
+lua_window_set_title :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.set_title: window not created"))
+		return 0
+	}
+
+	title_c := lua.L_checkstring(L, 1)
+	sdl.SetWindowTitle(Window, title_c)
+
+	return 0
 }
 
-// window.is_cursor_hidden() -> IsCursorHidden().
-lua_window_is_cursor_hidden :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushboolean(L, b32(rl.IsCursorHidden()))
-	return 1
+// lua_window_set_size implements window.set_size(width, height) in pixels.
+lua_window_set_size :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.set_size: window not created"))
+		return 0
+	}
+
+	w := lua.L_checkinteger(L, 1)
+	h := lua.L_checkinteger(L, 2)
+
+	if !sdl.SetWindowSize(Window, cast(c.int)(w), cast(c.int)(h)) {
+		lua.L_error(L, cstring("window.set_size: SetWindowSize failed"))
+		return 0
+	}
+
+	return 0
 }
 
-// window.is_cursor_on_screen() -> IsCursorOnScreen().
-lua_window_is_cursor_on_screen :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushboolean(L, b32(rl.IsCursorOnScreen()))
-	return 1
+// lua_window_set_position implements window.set_position(x, y) in pixels.
+lua_window_set_position :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.set_position: window not created"))
+		return 0
+	}
+
+	x := lua.L_checkinteger(L, 1)
+	y := lua.L_checkinteger(L, 2)
+
+	if !sdl.SetWindowPosition(Window, cast(c.int)(x), cast(c.int)(y)) {
+		lua.L_error(L, cstring("window.set_position: SetWindowPosition failed"))
+		return 0
+	}
+
+	return 0
 }
 
-// window.should_close() -> bool (raylib WindowShouldClose)
-lua_window_should_close :: proc "c" (L: ^lua.State) -> c.int {
-	lua.pushboolean(L, b32(rl.WindowShouldClose()))
-	return 1
+// lua_window_maximize implements window.maximize().
+lua_window_maximize :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.maximize: window not created"))
+		return 0
+	}
+
+	if !sdl.MaximizeWindow(Window) {
+		lua.L_error(L, cstring("window.maximize: MaximizeWindow failed"))
+		return 0
+	}
+
+	return 0
+}
+
+// lua_window_minimize implements window.minimize().
+lua_window_minimize :: proc "c" (L: ^lua.State) -> c.int {
+	if Window == nil {
+		lua.L_error(L, cstring("window.minimize: window not created"))
+		return 0
+	}
+
+	if !sdl.MinimizeWindow(Window) {
+		lua.L_error(L, cstring("window.minimize: MinimizeWindow failed"))
+		return 0
+	}
+
+	return 0
+}
+
+// register_window_api creates the monotome.window table and registers all window procs.
+register_window_api :: proc(L: ^lua.State) {
+	lua.newtable(L) // [window]
+
+	lua.pushcfunction(L, lua_window_init)
+	lua.setfield(L, -2, cstring("init"))
+
+	lua.pushcfunction(L, lua_window_width)
+	lua.setfield(L, -2, cstring("width"))
+
+	lua.pushcfunction(L, lua_window_height)
+	lua.setfield(L, -2, cstring("height"))
+
+	lua.pushcfunction(L, lua_window_columns)
+	lua.setfield(L, -2, cstring("columns"))
+
+	lua.pushcfunction(L, lua_window_rows)
+	lua.setfield(L, -2, cstring("rows"))
+
+	lua.pushcfunction(L, lua_window_pos_x)
+	lua.setfield(L, -2, cstring("pos_x"))
+
+	lua.pushcfunction(L, lua_window_pos_y)
+	lua.setfield(L, -2, cstring("pos_y"))
+
+	lua.pushcfunction(L, lua_window_set_title)
+	lua.setfield(L, -2, cstring("set_title"))
+
+	lua.pushcfunction(L, lua_window_set_size)
+	lua.setfield(L, -2, cstring("set_size"))
+
+	lua.pushcfunction(L, lua_window_set_position)
+	lua.setfield(L, -2, cstring("set_position"))
+
+	lua.pushcfunction(L, lua_window_maximize)
+	lua.setfield(L, -2, cstring("maximize"))
+
+	lua.pushcfunction(L, lua_window_minimize)
+	lua.setfield(L, -2, cstring("minimize"))
 }
 

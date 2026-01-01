@@ -1,251 +1,239 @@
-local monotome = require("monotome")
+local r = monotome.runtime
+local d = monotome.draw
+local w = monotome.window
+local i = monotome.input
 
-local draw     = monotome.draw
-local window   = monotome.window
-local input    = monotome.input
-local font     = monotome.font
-local runtime  = monotome.runtime
+local BG  = { 8, 10, 16, 255 }
+local DIM = { 130, 150, 170, 255 }
+local TXT = { 210, 230, 255, 255 }
+local OK  = { 120, 255, 180, 255 }
+local F   = 1
+local FB  = 2
 
+local PULSE = 0.12
+local p = {}
+local rep = {}
+local rls = {}
 
-local C = {
-	bg = { 15, 12, 21, 255 },
-	panel = { 16, 22, 30, 255 },
-	border = { 99, 123, 146, 255 },
-	text = { 210, 214, 210, 255 },
-	muted = { 140, 150, 165, 255 },
-	accent = { 24, 110, 116, 255 },
-	ok = { 70, 220, 150, 255 },
-	warn = { 191, 132, 98, 255 },
-	hot = { 255, 120, 200, 255 },
-
-	-- cursor overlay (cell-space)
-	cursor_fill = { 255, 255, 255, 36 },
-	cursor_line = { 255, 255, 255, 12 },
-	cursor_tip_bg = { 16, 22, 30, 220 },
+local watch = {
+  "left","right","up","down",
+  "escape","space","return","tab","backspace",
+  "lshift","lsuper",
+  "a","f1","f2","kp1",
 }
 
-local S = {
-	t = 0,
-	font_pt = 18,
-	ax = 15,
-	ay = 12,
-	typed = "",
-	pulses = {},
-	undec = false,
-	test_face = 1,
+local x, y = 10, 8
 
-	show_cursor = true,
-}
+local W_PULSE = 0.20
+local w_p = 0
+local w_dx = 0
+local w_dy = 0
 
-local function btn(x, y, label, active)
-	local w = #label + 2
-	local mx, my = input.mouse_pos()
-	local hot = (mx >= x and mx < x + w and my == y)
-	local bg_col = active and C.accent or (hot and C.border or C.panel)
-	local fg_col = hot and C.bg or (active and C.text or C.muted)
-	draw.rect(x, y, w, 1, bg_col)
-	draw.text(x + 1, y, label, fg_col)
-	return hot and input.mouse_pressed("left")
+local T_PULSE = 0.35
+local t_on = false
+local t_p = 0
+local t_last = ""
+local t_acc = ""
+
+local blink = 0
+
+local function utf8_pop(s)
+  local n = #s
+  if n == 0 then return s end
+  local i = n
+  while i > 0 do
+    local b = s:byte(i)
+    if b < 0x80 or b >= 0xC0 then break end
+    i = i - 1
+  end
+  if i <= 0 then return "" end
+  return s:sub(1, i - 1)
 end
 
-local function header(x, y, w, title)
-	draw.rect(x, y, w, 1, C.accent)
-	draw.text(x + 1, y, title:upper(), C.bg, 1) -- face=2 (Bold)
+function r.init()
+  w.init(900, 520, "input", { "resizable" })
 end
 
-local function panel_frame(x, y, w, h)
-	draw.rect(x, y, w, h, C.panel)
-	draw.text(x, y, "┌" .. ("─"):rep(w - 2) .. "┐", C.border)
-	draw.text(x, y + h - 1, "└" .. ("─"):rep(w - 2) .. "┘", C.border)
-	for i = 1, h - 2 do
-		draw.text(x, y + i, "│", C.border)
-		draw.text(x + w - 1, y + i, "│", C.border)
-	end
+function r.update(dt)
+  blink = blink + dt
+
+  for k,v in pairs(p) do v = v - dt; if v <= 0 then p[k] = nil else p[k] = v end end
+  for k,v in pairs(rep) do v = v - dt; if v <= 0 then rep[k] = nil else rep[k] = v end end
+  for k,v in pairs(rls) do v = v - dt; if v <= 0 then rls[k] = nil else rls[k] = v end end
+  if w_p > 0 then w_p = w_p - dt; if w_p < 0 then w_p = 0 end end
+  if t_p > 0 then t_p = t_p - dt; if t_p < 0 then t_p = 0 end end
+
+  for n = 1, #watch do
+    local k = watch[n]
+    if i.pressed(k) then p[k] = PULSE end
+    if i.repeated(k)  then rep[k] = PULSE end
+    if i.released(k) then rls[k] = PULSE end
+  end
+
+  if i.pressed("mouse1") then p["mouse1"] = PULSE end
+  if i.released("mouse1") then rls["mouse1"] = PULSE end
+  if i.pressed("mouse2") then p["mouse2"] = PULSE end
+  if i.released("mouse2") then rls["mouse2"] = PULSE end
+  if i.pressed("mouse3") then p["mouse3"] = PULSE end
+  if i.released("mouse3") then rls["mouse3"] = PULSE end
+
+  local dx, dy = i.mouse_wheel()
+  if dx ~= 0 or dy ~= 0 then
+    w_p = W_PULSE
+    w_dx = dx
+    w_dy = dy
+  end
+
+  if not t_on then
+    local ok = pcall(i.start_text)
+    if ok then t_on = true end
+  end
+
+  if i.pressed("f2") then
+    if t_on then
+      pcall(i.stop_text)
+      t_on = false
+    else
+      local ok = pcall(i.start_text)
+      if ok then t_on = true end
+    end
+  end
+
+  local chunk = i.text()
+  if chunk ~= "" then
+    t_p = T_PULSE
+    t_last = chunk
+    t_acc = t_acc .. chunk
+    if #t_acc > 4000 then
+      t_acc = t_acc:sub(#t_acc - 3999)
+    end
+  end
+
+  if i.pressed("backspace") or i.repeated("backspace") then
+    t_p = T_PULSE
+    t_last = "<bs>"
+    t_acc = utf8_pop(t_acc)
+  end
+
+  local step = i.down("lshift") and 4 or 1
+  if i.pressed("left")  then x = x - step end
+  if i.pressed("right") then x = x + step end
+  if i.pressed("up")    then y = y - step end
+  if i.pressed("down")  then y = y + step end
+
+  local cols = w.columns()
+  local rows = w.rows()
+  if x < 0 then x = 0 end
+  if y < 0 then y = 0 end
+  if cols > 0 and x > cols - 1 then x = cols - 1 end
+  if rows > 0 and y > rows - 1 then y = rows - 1 end
 end
 
--- Fix: Added namespace prefixes to state keys to prevent name collisions
-local function input_monitor(x, y, label, key, is_mouse)
-	local down = is_mouse and input.mouse_down(key) or input.key_down(key)
-	local p = is_mouse and input.mouse_pressed(key) or input.key_pressed(key)
-	local r = is_mouse and input.mouse_released(key) or input.key_released(key)
+function r.draw()
+  d.clear(BG)
 
-	local state_id = (is_mouse and "m:" or "k:") .. key
-	if p then S.pulses[state_id .. "_p"] = 0.2 end
-	if r then S.pulses[state_id .. "_r"] = 0.2 end
+  local cols = w.columns()
+  local rows = w.rows()
 
-	draw.text(x, y, string.format("%-4s", label), C.muted)
-	draw.text(x + 5, y, down and "●" or "·", down and C.ok or C.border)
-	if (S.pulses[state_id .. "_p"] or 0) > 0 then draw.text(x + 7, y, "P", C.ok) end
-	if (S.pulses[state_id .. "_r"] or 0) > 0 then draw.text(x + 9, y, "R", C.ok) end
-end
+  local panel_w = 28
+  local px = cols - panel_w
+  if px < 1 then px = 1 end
 
-local function clampi(v, lo, hi)
-	if v < lo then return lo end
-	if v > hi then return hi end
-	return v
-end
+  local on  = "o"
+  local off = "·"
 
-local function cursor_overlay(cols, rows, world_x0, world_w)
-	if not S.show_cursor then return end
+  d.text(px, 0, "D P Rp R     F2=text", DIM, F)
 
-	local cx, cy = input.mouse_pos()
+  local row = 2
+  for n = 1, #watch do
+    local k = watch[n]
+    local dn = i.down(k)
+    local pr = (p[k] ~= nil)
+    local rp = (rep[k] ~= nil)
+    local rl = (rls[k] ~= nil)
 
-	-- Only show overlay when cursor is inside the world panel.
-	if cx < world_x0 or cx >= (world_x0 + world_w) or cy < 0 or cy >= rows then
-		return
-	end
+    d.text(px, row, k, TXT, F)
+    d.text(px + 13, row, dn and on or off, dn and OK or DIM, F)
+    d.text(px + 15, row, pr and on or off, pr and OK or DIM, F)
+    d.text(px + 18, row, rp and on or off, rp and OK or DIM, F)
+    d.text(px + 21, row, rl and on or off, rl and OK or DIM, F)
+    row = row + 1
+  end
 
-	-- crosshair
-	draw.rect(world_x0, cy, world_w, 1, C.cursor_line)
-	draw.rect(cx, 0, 1, rows, C.cursor_line)
+  row = row + 1
+  d.text(px, row, "mouse1 mouse2 mouse3", TXT, FB)
+  row = row + 1
 
-	-- hovered cell highlight
-	draw.rect(cx, cy, 1, 1, C.cursor_fill)
+  for n = 1, 3 do
+    local k = "mouse" .. tostring(n)
+    local dn = i.down(k)
+    local pr = (p[k] ~= nil)
+    local rl = (rls[k] ~= nil)
 
-	-- tooltip (cell coords + world-local coords)
-	local wx = cx - world_x0
-	local wy = cy
+    d.text(px, row, k, TXT, F)
+    d.text(px + 13, row, dn and on or off, dn and OK or DIM, F)
+    d.text(px + 15, row, pr and on or off, pr and OK or DIM, F)
+    d.text(px + 21, row, rl and on or off, rl and OK or DIM, F)
+    row = row + 1
+  end
 
-	local tip = string.format("%d,%d  (w:%d,%d)", cx, cy, wx, wy)
-	local tw = #tip + 2
+  row = row + 1
+  local mc, mr = i.mouse_position()
+  d.text(px, row, "mouse_pos:", TXT, FB)
+  d.text(px + 11, row, tostring(mc) .. "," .. tostring(mr), OK, F)
+  row = row + 1
 
-	local tx = cx + 1
-	local ty = cy - 1
-	if tx + tw >= cols then tx = cx - tw end
-	if ty < 0 then ty = cy + 1 end
+  d.text(px, row, "wheel:", TXT, FB)
+  if w_p > 0 then
+    d.text(px + 7, row, tostring(w_dx) .. "," .. tostring(w_dy), OK, F)
+  else
+    d.text(px + 7, row, "0,0", DIM, F)
+  end
+  row = row + 1
 
-	tx = clampi(tx, world_x0, (world_x0 + world_w) - tw)
-	ty = clampi(ty, 0, rows - 1)
+  d.text(px, row, "text:", TXT, FB)
+  d.text(px + 7, row, t_on and on or off, t_on and OK or DIM, F)
+  if t_p > 0 then
+    d.text(px + 9, row, t_last, OK, F)
+  else
+    d.text(px + 9, row, "(none)", DIM, F)
+  end
 
-	draw.rect(tx, ty, tw, 1, C.cursor_tip_bg)
-	draw.text(tx + 1, ty, tip, C.text)
-end
-----------------------------------------
--- INIT
-----------------------------------------
-function runtime.init()
-	window.init(1200, 900, "monotome testbed", { "vsync_on", "resizable" })
-	font.init(S.font_pt)
-end
+  -- textbox (left side)
+  local bx = 1
+  local by = 1
+  local bw = px - 3
+  local bh = rows - 3
+  if bw < 8 then bw = 8 end
+  if bh < 6 then bh = 6 end
 
-----------------------------------------
--- UPDATE
-----------------------------------------
-function runtime.update(dt)
-	S.t = S.t + dt
-	for k, v in pairs(S.pulses) do
-		S.pulses[k] = v - dt
-		if S.pulses[k] <= 0 then S.pulses[k] = nil end
-	end
+  local top = "+" .. string.rep("-", bw - 2) .. "+"
+  local mid = "|" .. string.rep(" ", bw - 2) .. "|"
+  local bot = top
 
-	local txt = input.get_text()
-	if txt ~= "" then S.typed = (S.typed .. txt) end
-	if input.key_pressed("backspace") or input.key_repeat("backspace") then S.typed = S.typed:sub(1, -2) end
+  d.text(bx, by, top, DIM, F)
+  for yy = 1, bh - 2 do
+    d.text(bx, by + yy, mid, DIM, F)
+  end
+  d.text(bx, by + bh - 1, bot, DIM, F)
 
-	local ctrl = input.key_down("lctrl") or input.key_down("rctrl")
-	if ctrl and input.key_pressed("v") then S.typed = S.typed .. (window.get_clipboard() or "") end
-	if ctrl and input.key_pressed("c") then window.set_clipboard(S.typed) end
+  local cap = (bw - 2) * (bh - 2)
+  local s = t_acc
+  if #s > cap then
+    s = s:sub(#s - cap + 1)
+  end
 
-	local speed = input.key_down("lshift") and 2 or 1
-	if input.key_down("w") then S.ay = S.ay - speed end
-	if input.key_down("s") then S.ay = S.ay + speed end
-	if input.key_down("a") then S.ax = S.ax - speed end
-	if input.key_down("d") then S.ax = S.ax + speed end
+  local caret = ((math.floor(blink * 2) % 2) == 0) and "|" or " "
+  s = s .. caret
 
-	-- small toggle polish: show/hide cursor overlay
-	if input.key_pressed("tab") then S.show_cursor = not S.show_cursor end
-end
+  local idx = 1
+  for yy = 0, bh - 3 do
+    if idx > #s then break end
+    local line = s:sub(idx, idx + (bw - 3))
+    idx = idx + (bw - 2)
+    d.text(bx + 1, by + 1 + yy, line, OK, F)
+  end
 
-----------------------------------------
--- DRAW
-----------------------------------------
-function runtime.draw()
-	local cols, rows = window.grid_size()
-	local m = window.metrics()
-	local win_x, win_y = window.position() -- POS should always reflect the live window position
-
-	draw.clear(C.bg)
-
-	panel_frame(0, 0, 36, rows)
-	header(1, 1, 34, "System")
-
-	local cur_y = 3
-	draw.text(2, cur_y, "FONT:", C.muted)
-	if btn(8, cur_y, " - ") then
-		S.font_pt = math.max(8, S.font_pt - 1); font.set_size(S.font_pt)
-	end
-	if btn(13, cur_y, " + ") then
-		S.font_pt = S.font_pt + 1; font.set_size(S.font_pt)
-	end
-	draw.text(18, cur_y, tostring(S.font_pt) .. "px", C.text); cur_y = cur_y + 2
-
-	if btn(2, cur_y, " DECOR ", not S.undec) then
-		S.undec = not S.undec; window.set_undecorated(S.undec)
-	end
-	if btn(11, cur_y, " MIN ") then window.minimize() end
-	if btn(18, cur_y, " MAX ") then window.maximize() end; cur_y = cur_y + 2
-
-	header(1, cur_y, 34, "Metrics")
-	cur_y = cur_y + 2
-	draw.text(2, cur_y, string.format("GRID: %dx%d", m.cols, m.rows), C.muted)
-	draw.text(18, cur_y, string.format("CELL: %dx%d", m.cell_w, m.cell_h), C.muted); cur_y = cur_y + 1
-	draw.text(2, cur_y, string.format("WND:  %dx%d", m.px_w, m.px_h), C.muted)
-	draw.text(18, cur_y, string.format("WIN:  %d,%d", win_x, win_y), C.muted); cur_y = cur_y + 1
-
-	-- live, obvious coords
-	local mx, my = input.mouse_pos()
-	draw.text(2, cur_y, string.format("AT:   %d,%d", S.ax, S.ay), C.muted)
-	draw.text(18, cur_y, string.format("MOUSE:%d,%d", mx, my), C.muted); cur_y = cur_y + 2
-
-	header(1, cur_y, 34, "Input Monitor")
-	cur_y = cur_y + 2
-	local keys = { { "W", "w" }, { "A", "a" }, { "S", "s" }, { "D", "d" }, { "SPC", "space" }, { "ENT", "enter" }, { "BS", "backspace" }, { "ESC", "esc" } }
-	for i, k in ipairs(keys) do
-		local r_idx = math.floor((i - 1) / 2)
-		local c_idx = (i - 1) % 2
-		input_monitor(2 + (c_idx * 16), cur_y + r_idx, k[1], k[2])
-	end
-	cur_y = cur_y + 5
-	input_monitor(2, cur_y, "M1", "left", true)
-	input_monitor(18, cur_y, "M2", "right", true); cur_y = cur_y + 2
-
-	header(1, cur_y, 34, "Glyph Lab")
-	cur_y = cur_y + 2
-	local faces = { "REG", "BOLD", "ITAL", "BI" }
-	for i, name in ipairs(faces) do
-		if btn(2 + ((i - 1) * 8), cur_y, name, S.test_face == i) then S.test_face = i end
-	end
-	cur_y = cur_y + 2
-	draw.text(2, cur_y, "ABC abc 123 !@# Ω≈ç√ ∫µ≤≥", C.text, S.test_face)
-	cur_y = cur_y + 2
-
-	header(1, cur_y, 34, "Clipboard")
-	cur_y = cur_y + 2
-	local box_w, box_h = 32, 4
-
-	draw.rect(2, cur_y, box_w, box_h, C.bg)
-	draw.text(2, cur_y - 1, "TEXT BUFFER", C.border)
-
-	for i = 0, box_h - 1 do
-		local start_idx = (i * box_w) + 1
-		local line = S.typed:sub(start_idx, start_idx + box_w - 1)
-		if #line > 0 then draw.text(2, cur_y + i, line, C.warn) end
-	end
-
-	cur_y = cur_y + box_h + 1
-	if btn(2, cur_y, " COPY ") then window.set_clipboard(S.typed) end
-	if btn(10, cur_y, " PASTE ") then S.typed = S.typed .. (window.get_clipboard() or "") end
-	if btn(19, cur_y, " CLEAR ") then S.typed = "" end
-
-	local world_x0 = 37
-	local pw = cols - 37
-	panel_frame(world_x0, 0, pw, rows)
-	header(world_x0 + 1, 1, pw - 2, "World View")
-
-	-- world contents
-	draw.text(world_x0 + S.ax, S.ay, "@", C.hot)
-
-	-- cursor overlay drawn last (on top)
-	cursor_overlay(cols, rows, world_x0, pw)
+  d.text(x, y, "@", OK, FB)
 end
 
