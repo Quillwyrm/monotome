@@ -22,6 +22,7 @@ monotome.draw.clear(color)
 
 ### Returns  
 None.
+
 ---
 
 ## monotome.draw.text  
@@ -41,6 +42,7 @@ monotome.draw.text(x, y, text, color, face?)
 
 ### Returns  
 None.
+
 ---
 
 ## monotome.draw.rect  
