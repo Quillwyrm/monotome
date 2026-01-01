@@ -1,6 +1,13 @@
 # monotome.font
 The font management API, handling typeface loading and sizing.
 
+### Index
+* [`init`](#monotomefontinit)
+* [`load`](#monotomefontload)
+* [`set_size`](#monotomefontset_size)
+* [`size`](#monotomefontsize)
+* [`paths`](#monotomefontpaths)
+
 ---
 
 ## monotome.font.init

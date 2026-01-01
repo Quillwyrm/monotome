@@ -1,6 +1,17 @@
 # monotome.input
 The input API handles keyboard and mouse events. It provides both polling for live state and frame-accurate state changes (pressed/released).
 
+### Index
+* [`down`](#monotomeinputdown)
+* [`pressed`](#monotomeinputpressed)
+* [`released`](#monotomeinputreleased)
+* [`repeated`](#monotomeinputrepeated)
+* [`mouse_position`](#monotomeinputmouse_position)
+* [`mouse_wheel`](#monotomeinputmouse_wheel)
+* [`start_text`](#monotomeinputstart_text)
+* [`stop_text`](#monotomeinputstop_text)
+* [`text`](#monotomeinputtext)
+
 ### Valid Input Tokens
 All input functions expecting a `key` argument must use one of the following string tokens.
 - **Mouse:** `"mouse1"` (left), `"mouse2"` (right), `"mouse3"` (middle)
@@ -13,6 +24,7 @@ All input functions expecting a `key` argument must use one of the following str
 - **Symbols:** `"!"`, `"\""`, `"#"`, `"$"`, `"&"`, `"'"`, `"("`, `")"`, `"*"` `"+"`, `","`, `"-"`, `"."`, `"/"`, `":"`, `";"`, `"<"`, `"="`, `">"`, `"?"`, `"@"`, `"["`, `"\\"`, `"]"`, `"^"`, `"_"`, `"`"`
 - **System:** `"pause"`, `"printscreen"`, `"menu"`, `"power"`, `"undo"`, `"help"`, `"sysreq"`, `"application"`, `"currencyunit"`
 - **App Control:** `"appsearch"`, `"apphome"`, `"appback"`, `"appforward"`, `"apprefresh"`, `"appbookmarks"`
+
 ---
 
 ## monotome.input.down
@@ -110,6 +122,7 @@ None.
 ### Returns
 - `number: dx` - Horizontal scroll amount.
 - `number: dy` - Vertical scroll amount.
+
 ---
 
 ## monotome.input.start_text

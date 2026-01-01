@@ -1,6 +1,20 @@
 # monotome.window
 The windowing API for Monotome, handling the main display context, sizing, and positioning.
 
+### Index
+* [`init`](#monotomewindowinit)
+* [`width`](#monotomewindowwidth)
+* [`height`](#monotomewindowheight)
+* [`columns`](#monotomewindowcolumns)
+* [`rows`](#monotomewindowrows)
+* [`pos_x`](#monotomewindowpos_x)
+* [`pos_y`](#monotomewindowpos_y)
+* [`set_title`](#monotomewindowset_title)
+* [`set_size`](#monotomewindowset_size)
+* [`set_position`](#monotomewindowset_position)
+* [`maximize`](#monotomewindowmaximize)
+* [`minimize`](#monotomewindowminimize)
+
 ---
 
 ## monotome.window.init

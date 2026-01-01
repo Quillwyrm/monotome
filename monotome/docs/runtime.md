@@ -1,6 +1,11 @@
 # monotome.runtime
 The lifecycle hooks for the application. The script must assign functions to these slots to handle initialization, logic updates, and rendering.
 
+### Index
+* [`init`](#monotomeruntimeinit)
+* [`update`](#monotomeruntimeupdate)
+* [`draw`](#monotomeruntimedraw)
+
 ### Example: Minimal `main.lua`
 ```lua
 window = monotome.window
