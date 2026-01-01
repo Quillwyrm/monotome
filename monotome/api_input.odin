@@ -16,7 +16,7 @@ import lua "luajit"
 // Lua surface (monotome.input):
 //   down(name: string)        -> bool
 //   pressed(name: string)     -> bool   // initial edge only (non-repeat)
-//   repeat(name: string)      -> bool   // OS typematic repeat edge only
+//   repeated(name: string)      -> bool   // OS typematic repeat edge only
 //   released(name: string)    -> bool
 //   mouse_position()          -> (col:int, row:int)       // cell coords, may be OOB
 //   mouse_wheel()             -> (dx:number, dy:number)   // per-frame accumulated, cleared each new frame
@@ -432,11 +432,11 @@ lua_input_repeated :: proc "c" (L: ^lua.State) -> c.int {
 	context = runtime.default_context()
 
 	if !Input_Initialized {
-		lua.L_error(L, cstring("monotome.input.repeat: input not initialized"))
+		lua.L_error(L, cstring("monotome.input.repeated: input not initialized"))
 		return 0
 	}
 	if lua.gettop(L) != 1 {
-		lua.L_error(L, cstring("monotome.input.repeat expects 1 arg: name"))
+		lua.L_error(L, cstring("monotome.input.repeated expects 1 arg: name"))
 		return 0
 	}
 
@@ -445,13 +445,13 @@ lua_input_repeated :: proc "c" (L: ^lua.State) -> c.int {
 	name := strings.string_from_ptr(cast(^byte)(name_c), int(name_len))
 
 	if _, is_mouse := mouse_token_to_index(name); is_mouse {
-		lua.L_error(L, cstring("monotome.input.repeat: '%.*s' is a mouse token"), c.int(name_len), name_c)
+		lua.L_error(L, cstring("monotome.input.repeated: '%.*s' is a mouse token"), c.int(name_len), name_c)
 		return 0
 	}
 
 	idx, ok := Token_To_Index[name]
 	if !ok {
-		lua.L_error(L, cstring("monotome.input.repeat: unknown token '%.*s'"), c.int(name_len), name_c)
+		lua.L_error(L, cstring("monotome.input.repeated: unknown token '%.*s'"), c.int(name_len), name_c)
 		return 0
 	}
 

@@ -110,12 +110,10 @@ call_lua_number :: proc(fn: cstring, x: f64) -> bool {
 // MAIN RUNTIME ENTRY
 // ...
 //========================================================================================================================================
-
-// main boots SDL, Lua, and the text engine, then runs the perf-counter-driven loop.
 main :: proc() {
-	//set default context for this scope
+	// set default context for this scope
 	context = runtime.default_context()
-	
+
 	// SDL init.
 	if !sdl.Init({.VIDEO}) {
 		fmt.eprintln("SDL_Init failed:", sdl.GetError())
@@ -123,12 +121,82 @@ main :: proc() {
 	}
 	defer sdl.Quit()
 
-	// Window and renderer will be created from Lua via window.init(...).
-	defer sdl.DestroyWindow(Window)
-	defer sdl.DestroyRenderer(Renderer)
+	// -----------------------------
+	// Lua state + main.lua
+	// -----------------------------
+	Lua = lua.L_newstate()
+	if Lua == nil {
+		fmt.eprintln("Lua L_newstate failed")
+		return
+	}
+	defer lua.close(Lua)
 
+	lua.L_openlibs(Lua)
+	register_lua_api() // sets global `monotome` with .runtime, .draw, .window, .input
 
-	// Cleanup: text cache, text engine, fonts.
+	// Resolve <exe_dir>/main.lua
+	exe_dir, err := os.get_executable_directory(context.temp_allocator)
+	if err != os.ERROR_NONE {
+		fmt.eprintln("get_executable_directory failed:", err)
+		return
+	}
+
+	main_path, err2 := os.join_path({exe_dir, "main.lua"}, context.temp_allocator)
+	if err2 != os.ERROR_NONE {
+		fmt.eprintln("join_path for main.lua failed:", err2)
+		return
+	}
+
+	main_path_c := strings.clone_to_cstring(main_path, context.temp_allocator)
+
+	if lua.L_dofile(Lua, main_path_c) != lua.Status.OK {
+		lua_err := lua.tostring(Lua, -1)
+		fmt.printf("Lua load error:\n%s\n", lua_err)
+		lua.settop(Lua, 0)
+		return
+	}
+	lua.settop(Lua, 0)
+
+	mem.free_all(context.temp_allocator)
+
+	// Lua init: monotome.runtime.init() should call monotome.window.init(...).
+	if !call_lua_noargs(cstring("init")) {
+		return
+	}
+
+	mem.free_all(context.temp_allocator)
+
+	if Window == nil || Renderer == nil {
+		fmt.eprintln("runtime.init() did not call monotome.window.init(...)")
+		return
+	}
+
+	// Window/renderer are required: runtime.init() must have created them.
+	// Ensure correct destruction order on shutdown (renderer before window).
+	defer {
+		if Renderer != nil {
+			sdl.DestroyRenderer(Renderer)
+			Renderer = nil
+		}
+		if Window != nil {
+			sdl.DestroyWindow(Window)
+			Window = nil
+		}
+	}
+
+	// -----------------------------
+	// INPUT INIT (Phase 1)
+	// -----------------------------
+	input_init()
+
+	// TTF init (now that Renderer exists).
+	if !ttf.Init() {
+		fmt.eprintln("TTF_Init failed:", sdl.GetError())
+		return
+	}
+	defer ttf.Quit()
+
+	// Cleanup: text cache, text engine, fonts. Must run before ttf.Quit().
 	defer {
 		// Destroy cached Text objects.
 		destroy_text_cache()
@@ -147,70 +215,6 @@ main :: proc() {
 			}
 		}
 	}
-
-	// -----------------------------
-	// Lua state + main.lua
-	// -----------------------------
-	Lua = lua.L_newstate()
-	if Lua == nil {
-		fmt.eprintln("Lua L_newstate failed")
-		return
-	}
-	defer lua.close(Lua)
-
-	lua.L_openlibs(Lua)
-	register_lua_api() // sets global `monotome` with .runtime, .draw, .window, .input (you did the rest)
-
-	// Resolve <exe_dir>/main.lua
-	exe_dir, err := os.get_executable_directory(context.allocator)
-	if err != os.ERROR_NONE {
-		fmt.eprintln("get_executable_directory failed:", err)
-		return
-	}
-
-	main_path, err2 := os.join_path({exe_dir, "main.lua"}, context.allocator)
-	if err2 != os.ERROR_NONE {
-		fmt.eprintln("join_path for main.lua failed:", err2)
-		return
-	}
-	
-	main_path_c := strings.clone_to_cstring(main_path, context.temp_allocator)
-
-
-	if lua.L_dofile(Lua, main_path_c) != lua.Status.OK {
-		lua_err := lua.tostring(Lua, -1)
-		fmt.printf("Lua load error:\n%s\n", lua_err)
-		lua.settop(Lua, 0)
-		return
-	}
-	lua.settop(Lua, 0)
-
-	mem.free_all(context.temp_allocator)
-	
-	// Lua init: monotome.runtime.init() should call monotome.window.init(...).
-	if !call_lua_noargs(cstring("init")) {
-		return
-	}
-	
-	mem.free_all(context.temp_allocator)
-
-
-	if Window == nil || Renderer == nil {
-		fmt.eprintln("runtime.init() did not call monotome.window.init(...)")
-		return
-	}
-
-	// -----------------------------
-	// INPUT INIT (Phase 1)
-	// -----------------------------
-	input_init()
-
-	// TTF init (now that Renderer exists).
-	if !ttf.Init() {
-		fmt.eprintln("TTF_Init failed:", sdl.GetError())
-		return
-	}
-	defer ttf.Quit()
 
 	// Font backend setup (loads fonts, computes Cell_W/Cell_H, clears text cache if needed).
 	apply_font_changes()
@@ -235,19 +239,17 @@ main :: proc() {
 	running := true
 
 	for running {
-		// Phase 1 input: clear per-frame edges before polling.
+		// Phase 1 input: clear edge + wheel/text buffers.
 		input_begin_frame()
 
 		for sdl.PollEvent(&event) {
-			// Phase 1 input: feed every event.
-			input_handle_event(&event)
-
 			if event.type == .QUIT {
 				running = false
+				break
 			}
-		}
-		if !running {
-			break
+
+			// Phase 1 input: key edges + wheel + text input from events.
+			input_handle_event(&event)
 		}
 
 		// Phase 1 input: sample final mouse state for this frame.
@@ -269,10 +271,11 @@ main :: proc() {
 		if !call_lua_noargs(cstring("draw")) {
 			break
 		}
-		//present renderer frame content
+
+		// present renderer frame content
 		sdl.RenderPresent(Renderer)
-		
-		//free all allocations on the default context temp_allocator
+
+		// free all allocations on the default context temp_allocator
 		mem.free_all(context.temp_allocator)
 	}
 }

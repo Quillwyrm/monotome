@@ -211,7 +211,7 @@ lua_draw_text :: proc "c" (L: ^lua.State) -> c.int {
 	}
 
 	// Iterate Lua string directly (no cloning). One rune = one cell.
-	s := strings.string_from_ptr(cast(^u8)(text_c), int(text_len))
+	s := strings.string_from_ptr(cast(^byte)(text_c), int(text_len))
 
 	x := start_x
 	for r in s {

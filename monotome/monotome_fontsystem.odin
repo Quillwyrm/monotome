@@ -103,7 +103,7 @@ compute_font_metrics :: proc() {
 	minx, maxx, miny, maxy, advance: c.int
 	ok := ttf.GetGlyphMetrics(Active_Font[0], u32(' '), &minx, &maxx, &miny, &maxy, &advance)
 	if !ok {
-		panic("compute_font_metrics: GetGlyphMetrics failed for 'M'")
+		panic("compute_font_metrics: GetGlyphMetrics failed for ' '")
 	}
 
 	Cell_W = f32(advance)
@@ -186,14 +186,6 @@ apply_font_changes :: proc() {
 	}
 
 	compute_font_metrics()
-
-	// Fonts changed ⇒ cached text is invalid; clear all maps.
-	for face in 0..<4 {
-		if Text_Cache[face] != nil {
-			delete(Text_Cache[face])
-			Text_Cache[face] = nil
-		}
-	}
 }
 
 

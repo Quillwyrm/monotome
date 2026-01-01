@@ -44,7 +44,7 @@ read_font_paths4 :: proc(L: ^lua.State, idx: lua.Index) {
 			return
 		}
 
-		s := strings.string_from_ptr(cast(^u8)(path_c), int(path_len))
+		s := strings.string_from_ptr(cast(^byte)(path_c), int(path_len))
 		Font_Path[face] = strings.clone(s, context.allocator)
 
 		i += 1

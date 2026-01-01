@@ -28,7 +28,7 @@ read_window_flags :: proc(L: ^lua.State, idx: lua.Index) -> (fullscreen, borderl
 
 		len: c.size_t
 		p := lua.L_checklstring(L, -1, &len)
-		s := strings.string_from_ptr(cast(^u8)(p), int(len))
+		s := strings.string_from_ptr(cast(^byte)(p), int(len))
 
 		if s == "fullscreen" {
 			fullscreen = true
