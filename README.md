@@ -31,7 +31,7 @@ Full API documentation is available in the [docs/](docs/api_monotome.md) folder.
 
 ## Status
 
-**Active Development.** The backend recently migrated from Raylib to SDL3. The core API is stable but subject to change as features (like clipboard support) are ported over.
+**Active Development.** The backend recently migrated from Raylib to SDL3. The core API is stable but subject to change.
 
 ## Run it
 
