@@ -33,18 +33,20 @@ This example demonstrates the standard lifecycle:
 5.  **Draw:** Render the state to the grid.
 
 ```lua
--- 1. Localize API
+-- Localize API
 local runtime = monotome.runtime
 local window  = monotome.window
 local draw    = monotome.draw
 local input   = monotome.input
 local font    = monotome.font
 
--- 2. App State
+-- Declare State
 local x, y = 5, 5
 local color = {255, 255, 255, 255}
 
--- 3. Initialization
+--------------------------------------------------------------
+-- INIT
+--------------------------------------------------------------
 runtime.init = function()
   window.init(800, 600, "Monotome Example", {"resizable"})
   
@@ -57,7 +59,9 @@ runtime.init = function()
   })
 end
 
--- 4. Logic Loop
+--------------------------------------------------------------
+-- UPDATE (Logic Loop)
+--------------------------------------------------------------
 runtime.update = function(dt)
   -- Exit on Escape
   if input.pressed("escape") then
@@ -78,7 +82,9 @@ runtime.update = function(dt)
   end
 end
 
--- 5. Render Loop
+--------------------------------------------------------------
+-- DRAW (Render Loop)
+--------------------------------------------------------------
 runtime.draw = function()
   draw.clear({10, 10, 15, 255}) -- Clear background
   
