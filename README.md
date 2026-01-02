@@ -22,10 +22,8 @@ A small set of primitives exposed to Lua via the global `monotome` table:
 
 ## Documentation
 
-Full API documentation is available in the [docs/](docs/monotome.md) folder.
+Full API documentation is available here: * [API Reference](docs/monotome.md)
 
-* [API Reference](docs/monotome.md)
-* [Lifecycle Hooks](docs/runtime.md)
 
 ## Notes
 
