@@ -353,6 +353,48 @@ input_end_frame :: proc() {
 	Mouse_Y = my
 }
 
+// input_shutdown frees input-owned allocations and resets state.
+// Host-only. Safe to call even if init never happened.
+input_shutdown :: proc() {
+	if !Input_Initialized {
+		return
+	}
+
+	// dynamic arrays
+	delete(Key_Pressed);     Key_Pressed     = nil
+	delete(Key_Repeat);      Key_Repeat      = nil
+	delete(Key_Released);    Key_Released    = nil
+	delete(Key_State_Index); Key_State_Index = nil
+
+	// maps
+	if Token_To_Index != nil {
+		delete(Token_To_Index)
+		Token_To_Index = nil
+	}
+	if Keycode_To_Index != nil {
+		delete(Keycode_To_Index)
+		Keycode_To_Index = nil
+	}
+
+	// state reset (no external ownership)
+	Keyboard_State = nil
+	Keyboard_State_Count = 0
+
+	Curr_MouseButtons = {}
+	Mouse_Pressed  = {}
+	Mouse_Released = {}
+
+	Mouse_X = 0
+	Mouse_Y = 0
+	Wheel_X = 0
+	Wheel_Y = 0
+
+	Text_Active = false
+	Text_Len = 0
+
+	Input_Initialized = false
+}
+
 //========================================================================================================================================
 // LUA SURFACE (C CALLS)
 //========================================================================================================================================

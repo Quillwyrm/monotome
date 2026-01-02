@@ -12,7 +12,6 @@ import lua "luajit"
 
 //========================================================================================================================================
 // CORE ENGINE STATE
-// ...
 //========================================================================================================================================
 
 Window   : ^sdl.Window
@@ -21,7 +20,6 @@ Lua 		 : ^lua.State
 
 //========================================================================================================================================
 // LUA EMBEDDING HELPERS
-// ...
 //========================================================================================================================================
 
 // register_lua_api builds the global `monotome` table with runtime/draw/font/window sub-tables.
@@ -52,7 +50,6 @@ register_lua_api :: proc() {
 	// Global: monotome = <that table>
 	lua.setglobal(Lua, cstring("monotome"))   // pops table; stack: []
 }
-
 
 // lua_traceback is the error handler for lua.pcall; it converts an error into a traceback string.
 lua_traceback :: proc "c" (L: ^lua.State) -> c.int {
@@ -108,22 +105,22 @@ call_lua_number :: proc(fn: cstring, x: f64) -> bool {
 
 //========================================================================================================================================
 // MAIN RUNTIME ENTRY
-// ...
 //========================================================================================================================================
 main :: proc() {
-	// set default context for this scope
 	context = runtime.default_context()
 
-	// SDL init.
+	// ---------------------------------------------------------------------
+	// SDL
+	// ---------------------------------------------------------------------
 	if !sdl.Init({.VIDEO}) {
 		fmt.eprintln("SDL_Init failed:", sdl.GetError())
 		return
 	}
 	defer sdl.Quit()
 
-	// -----------------------------
-	// Lua state + main.lua
-	// -----------------------------
+	// ---------------------------------------------------------------------
+	// Lua: load main.lua and run runtime.init()
+	// ---------------------------------------------------------------------
 	Lua = lua.L_newstate()
 	if Lua == nil {
 		fmt.eprintln("Lua L_newstate failed")
@@ -132,9 +129,8 @@ main :: proc() {
 	defer lua.close(Lua)
 
 	lua.L_openlibs(Lua)
-	register_lua_api() // sets global `monotome` with .runtime, .draw, .window, .input
+	register_lua_api()
 
-	// Resolve <exe_dir>/main.lua
 	exe_dir, err := os.get_executable_directory(context.temp_allocator)
 	if err != os.ERROR_NONE {
 		fmt.eprintln("get_executable_directory failed:", err)
@@ -159,123 +155,92 @@ main :: proc() {
 
 	mem.free_all(context.temp_allocator)
 
-	// Lua init: monotome.runtime.init() should call monotome.window.init(...).
 	if !call_lua_noargs(cstring("init")) {
 		return
 	}
 
 	mem.free_all(context.temp_allocator)
 
+	// runtime.init() must call monotome.window.init(...)
 	if Window == nil || Renderer == nil {
 		fmt.eprintln("runtime.init() did not call monotome.window.init(...)")
 		return
 	}
 
-	// Window/renderer are required: runtime.init() must have created them.
-	// Ensure correct destruction order on shutdown (renderer before window).
-	defer {
-		if Renderer != nil {
-			sdl.DestroyRenderer(Renderer)
-			Renderer = nil
-		}
-		if Window != nil {
-			sdl.DestroyWindow(Window)
-			Window = nil
-		}
+	// Hard-set VSync for now.
+	if !sdl.SetRenderVSync(Renderer, 1) {
+		fmt.eprintln("VSync failed:", sdl.GetError())
 	}
 
-	// -----------------------------
-	// INPUT INIT (Phase 1)
-	// -----------------------------
-	input_init()
+	// Window/module owns window teardown. Host calls once.
+	defer window_shutdown()
 
-	// TTF init (now that Renderer exists).
+	// ---------------------------------------------------------------------
+	// Input
+	// ---------------------------------------------------------------------
+	input_init()
+	defer input_shutdown()
+
+	// ---------------------------------------------------------------------
+	// Fonts / SDL_ttf
+	// ---------------------------------------------------------------------
 	if !ttf.Init() {
 		fmt.eprintln("TTF_Init failed:", sdl.GetError())
 		return
 	}
 	defer ttf.Quit()
+	defer font_shutdown() // must run before ttf.Quit()
 
-	// Cleanup: text cache, text engine, fonts. Must run before ttf.Quit().
-	defer {
-		// Destroy cached Text objects.
-		destroy_text_cache()
-
-		// Destroy text engine.
-		if Text_Engine != nil {
-			ttf.DestroyRendererTextEngine(Text_Engine)
-			Text_Engine = nil
-		}
-
-		// Close fonts.
-		for i in 0..<4 {
-			if Active_Font[i] != nil {
-				ttf.CloseFont(Active_Font[i])
-				Active_Font[i] = nil
-			}
-		}
-	}
-
-	// Font backend setup (loads fonts, computes Cell_W/Cell_H, clears text cache if needed).
 	apply_font_changes()
 
-	// Text engine bound to global Renderer.
 	Text_Engine = ttf.CreateRendererTextEngine(Renderer)
 	if Text_Engine == nil {
 		fmt.eprintln("CreateRendererTextEngine failed")
 		return
 	}
 
-	// -----------------------------
-	// High-resolution timing setup (seconds).
-	// -----------------------------
+	// ---------------------------------------------------------------------
+	// Timing
+	// ---------------------------------------------------------------------
 	perf_freq    := f64(sdl.GetPerformanceFrequency())
 	last_counter := sdl.GetPerformanceCounter()
 
-	// -----------------------------
-	// Event loop.
-	// -----------------------------
+	// ---------------------------------------------------------------------
+	// Event loop
+	// ---------------------------------------------------------------------
 	event: sdl.Event
 	running := true
 
 	for running {
-		// Phase 1 input: clear edge + wheel/text buffers.
 		input_begin_frame()
 
 		for sdl.PollEvent(&event) {
-			if event.type == .QUIT {
-				running = false
-				break
+			if event.type == .QUIT || event.type == .WINDOW_CLOSE_REQUESTED {
+				Quit_Requested = true
 			}
-
-			// Phase 1 input: key edges + wheel + text input from events.
 			input_handle_event(&event)
 		}
 
-		// Phase 1 input: sample final mouse state for this frame.
 		input_end_frame()
 
-		// Real dt in seconds using SDL's performance counter.
 		now_counter := sdl.GetPerformanceCounter()
 		delta_ticks := now_counter - last_counter
 		last_counter = now_counter
-
 		dt := f64(delta_ticks) / perf_freq
 
-		// Lua update(dt)
 		if !call_lua_number(cstring("update"), dt) {
 			break
 		}
-
-		// Lua draw()
 		if !call_lua_noargs(cstring("draw")) {
 			break
 		}
 
-		// present renderer frame content
 		sdl.RenderPresent(Renderer)
 
-		// free all allocations on the default context temp_allocator
+		if Quit_Requested {
+			running = false
+		}
+
 		mem.free_all(context.temp_allocator)
 	}
 }

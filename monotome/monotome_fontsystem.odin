@@ -188,5 +188,24 @@ apply_font_changes :: proc() {
 	compute_font_metrics()
 }
 
+// font_shutdown tears down SDL_ttf resources (text cache, text engine, fonts).
+// Host-only. Must run before ttf.Quit().
+font_shutdown :: proc() {
+	destroy_text_cache()
+
+	if Text_Engine != nil {
+		ttf.DestroyRendererTextEngine(Text_Engine)
+		Text_Engine = nil
+	}
+
+	for i in 0..<4 {
+		if Active_Font[i] != nil {
+			ttf.CloseFont(Active_Font[i])
+			Active_Font[i] = nil
+		}
+	}
+}
+
+
 
 

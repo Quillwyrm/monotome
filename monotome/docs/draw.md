@@ -1,7 +1,7 @@
 # monotome.draw
 The rendering API for drawing text and rects to the cell grid.
 
-### Index
+### Functions
 * [`clear`](#monotomedrawclear)
 * [`text`](#monotomedrawtext)
 * [`rect`](#monotomedrawrect)

@@ -1,7 +1,7 @@
 # monotome.input
 The input API handles keyboard and mouse events. It provides both polling for live state and frame-accurate state changes (pressed/released).
 
-### Index
+### Functions
 * [`down`](#monotomeinputdown)
 * [`pressed`](#monotomeinputpressed)
 * [`released`](#monotomeinputreleased)

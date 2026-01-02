@@ -1,19 +1,33 @@
 # monotome.window
-The windowing API for Monotome, handling the main display context, sizing, and positioning.
+The windowing API for Monotome, handling the main display context, sizing, positioning, cursors, and clipboard.
 
-### Index
+### Functions
+**Lifecycle**
 * [`init`](#monotomewindowinit)
-* [`width`](#monotomewindowwidth)
-* [`height`](#monotomewindowheight)
-* [`columns`](#monotomewindowcolumns)
-* [`rows`](#monotomewindowrows)
-* [`pos_x`](#monotomewindowpos_x)
-* [`pos_y`](#monotomewindowpos_y)
+* [`close`](#monotomewindowclose)
+* [`should_close`](#monotomewindowshould_close)
+
+**Getters**
+* [`size`](#monotomewindowsize)
+* [`grid_size`](#monotomewindowgrid_size)
+* [`cell_size`](#monotomewindowcell_size)
+* [`position`](#monotomewindowposition)
+* [`metrics`](#monotomewindowmetrics)
+
+**Setters**
 * [`set_title`](#monotomewindowset_title)
 * [`set_size`](#monotomewindowset_size)
 * [`set_position`](#monotomewindowset_position)
 * [`maximize`](#monotomewindowmaximize)
 * [`minimize`](#monotomewindowminimize)
+
+**Cursor & Clipboard**
+* [`set_cursor`](#monotomewindowset_cursor)
+* [`cursor_show`](#monotomewindowcursor_show)
+* [`cursor_hide`](#monotomewindowcursor_hide)
+* [`cursor_visible`](#monotomewindowcursor_visible)
+* [`get_clipboard`](#monotomewindowget_clipboard)
+* [`set_clipboard`](#monotomewindowset_clipboard)
 
 ---
 
@@ -36,99 +50,126 @@ None.
 
 ---
 
-## monotome.window.width
-Gets the current window width in pixels.
+## monotome.window.close
+Requests the engine to close the window and quit. This sets a flag; the actual exit happens at the end of the current frame.
 
 ### Usage
 ```lua
-width = monotome.window.width()
+monotome.window.close()
 ```
 
 ### Arguments
 None.
 
 ### Returns
-- `number: width` - The width of the window in pixels.
+None.
 
 ---
 
-## monotome.window.height
-Gets the current window height in pixels.
+## monotome.window.should_close
+Checks if a quit request has been issued (e.g. by the OS window close button or `window.close()`).
 
 ### Usage
 ```lua
-height = monotome.window.height()
+closing = monotome.window.should_close()
 ```
 
 ### Arguments
 None.
 
 ### Returns
-- `number: height` - The height of the window in pixels.
+- `boolean: closing` - `true` if the app is scheduled to exit.
 
 ---
 
-## monotome.window.columns
-Gets the window width in calculated text columns.
+## monotome.window.size
+Gets the current window dimensions in pixels.
 
 ### Usage
 ```lua
-cols = monotome.window.columns()
+w, h = monotome.window.size()
 ```
 
 ### Arguments
 None.
 
 ### Returns
-- `number: cols` - The number of text columns that fit in the window.
+- `number: w` - Window width in pixels.
+- `number: h` - Window height in pixels.
 
 ---
 
-## monotome.window.rows
-Gets the window height in calculated text rows.
+## monotome.window.grid_size
+Gets the current window capacity in whole text cells.
 
 ### Usage
 ```lua
-rows = monotome.window.rows()
+cols, rows = monotome.window.grid_size()
 ```
 
 ### Arguments
 None.
 
 ### Returns
-- `number: rows` - The number of text rows that fit in the window.
+- `number: cols` - Number of columns that fit in the window.
+- `number: rows` - Number of rows that fit in the window.
 
 ---
 
-## monotome.window.pos_x
-Gets the window's X position on the desktop.
+## monotome.window.cell_size
+Gets the current dimensions of a single character cell in pixels.
 
 ### Usage
 ```lua
-x = monotome.window.pos_x()
+cw, ch = monotome.window.cell_size()
 ```
 
 ### Arguments
 None.
 
 ### Returns
-- `number: x` - The X coordinate of the window's top-left corner.
+- `number: cw` - Cell width in pixels.
+- `number: ch` - Cell height in pixels.
 
 ---
 
-## monotome.window.pos_y
-Gets the window's Y position on the desktop.
+## monotome.window.position
+Gets the window's top-left coordinates on the desktop.
 
 ### Usage
 ```lua
-y = monotome.window.pos_y()
+x, y = monotome.window.position()
 ```
 
 ### Arguments
 None.
 
 ### Returns
-- `number: y` - The Y coordinate of the window's top-left corner.
+- `number: x` - Desktop X coordinate.
+- `number: y` - Desktop Y coordinate.
+
+---
+
+## monotome.window.metrics
+Efficiently retrieves all window metric data in a single call.
+
+### Usage
+```lua
+cols, rows, cw, ch, w, h, x, y = monotome.window.metrics()
+```
+
+### Arguments
+None.
+
+### Returns
+1. `number: cols` - Grid columns.
+2. `number: rows` - Grid rows.
+3. `number: cw` - Cell width.
+4. `number: ch` - Cell height.
+5. `number: w` - Window width.
+6. `number: h` - Window height.
+7. `number: x` - Window X pos.
+8. `number: y` - Window Y pos.
 
 ---
 
@@ -208,6 +249,102 @@ monotome.window.minimize()
 
 ### Arguments
 None.
+
+### Returns
+None.
+
+---
+
+## monotome.window.set_cursor
+Sets the system mouse cursor shape.
+
+### Usage
+```lua
+monotome.window.set_cursor(name)
+```
+
+### Arguments
+- `string: name` - One of: `"arrow"`, `"ibeam"`, `"wait"`, `"waitarrow"`, `"crosshair"`, `"sizenwse"`, `"sizenesw"`, `"sizewe"`, `"sizens"`, `"sizeall"`, `"no"`, `"hand"`.
+
+### Returns
+None.
+
+---
+
+## monotome.window.cursor_show
+Shows the mouse cursor.
+
+### Usage
+```lua
+monotome.window.cursor_show()
+```
+
+### Arguments
+None.
+
+### Returns
+None.
+
+---
+
+## monotome.window.cursor_hide
+Hides the mouse cursor.
+
+### Usage
+```lua
+monotome.window.cursor_hide()
+```
+
+### Arguments
+None.
+
+### Returns
+None.
+
+---
+
+## monotome.window.cursor_visible
+Checks if the cursor is currently visible.
+
+### Usage
+```lua
+visible = monotome.window.cursor_visible()
+```
+
+### Arguments
+None.
+
+### Returns
+- `boolean: visible` - `true` if the cursor is visible.
+
+---
+
+## monotome.window.get_clipboard
+Gets the text currently in the OS clipboard.
+
+### Usage
+```lua
+text = monotome.window.get_clipboard()
+```
+
+### Arguments
+None.
+
+### Returns
+- `string: text` - The clipboard content (or empty string).
+
+---
+
+## monotome.window.set_clipboard
+Sets the OS clipboard text.
+
+### Usage
+```lua
+monotome.window.set_clipboard(text)
+```
+
+### Arguments
+- `string: text` - The text to copy to the clipboard. Must not contain NUL bytes.
 
 ### Returns
 None.

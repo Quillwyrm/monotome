@@ -1,39 +1,10 @@
 # monotome.runtime
 The lifecycle hooks for the application. The script must assign functions to these slots to handle initialization, logic updates, and rendering.
 
-### Index
+### Callback Functions
 * [`init`](#monotomeruntimeinit)
 * [`update`](#monotomeruntimeupdate)
 * [`draw`](#monotomeruntimedraw)
-
-### Example: Minimal `main.lua`
-```lua
-window = monotome.window
-font   = monotome.font
-input  = monotome.input
-draw   = monotome.draw
-
-monotome.runtime.init = function()
-  window.init(800, 600, "My App")
-  font.init(16, {
-    "path/regular.ttf",
-    "path/bold.ttf",
-    "path/italic.ttf",
-    "path/bolditalic.ttf"
-  })
-end
-
-monotome.runtime.update = function(dt)
-  if input.pressed("escape") then
-    -- Handle quit (currently via window close)
-  end
-end
-
-monotome.runtime.draw = function()
-  draw.clear({0, 0, 0, 255})
-  draw.text(10, 10, "Hello World", {255, 255, 255, 255})
-end
-```
 
 ---
 
