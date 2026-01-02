@@ -17,7 +17,7 @@ A small set of primitives exposed to Lua via the global `monotome` table:
 * `font` — managed TTF rendering with strict 4-face styling (Regular, Bold, Italic, BI)
 
 ## Documentation
-Full API documentation is available in the [docs/](docs/monotome.md) folder.
+Full API documentation is available in the [docs/](docs/api_monotome.md) folder.
 
 * [API Reference](docs/monotome.md)
 
