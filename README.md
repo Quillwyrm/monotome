@@ -6,10 +6,6 @@
 
 It’s aimed at **terminal-style apps**, **experiments**, **toys**, and **small games** that want a textmode look, expressive scripting, and fast iteration.
 
-## Tech Stack
-
-Built with **Odin**, **SDL3**, **SDL_ttf**, and **LuaJIT**.
-
 ## What you get
 
 A small set of primitives exposed to Lua via the global `monotome` table:
@@ -31,6 +27,7 @@ Full API documentation is available in the [docs/](docs/monotome.md) folder.
 * Text rendering is **SDL_ttf based** (not a bitmap font sheet).
 * Rendering is **cell-space / textmode**: you work in `(col, row)` coordinates.
 * Monotome is **not a terminal emulator**; it does not emulate VT100 or ANSI codes.
+* Built with **Odin**, **SDL3**, **SDL_ttf**, and **LuaJIT**.
 
 ## Status
 
