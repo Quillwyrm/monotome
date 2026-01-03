@@ -208,7 +208,7 @@ local function text_toggle()
 end
 
 function r.init()
-  w.init(900, 900, "monotome api test", { "resizable" })
+  w.init(1920, 1080, "monotome api test", { "resizable" })
 
   -- start text input ON once (no auto-forcing in update)
   local ok = pcall(i.start_text)

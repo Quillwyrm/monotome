@@ -7,6 +7,8 @@ import "core:fmt"
 import "core:strings"
 import lua "luajit"
 import sdl "vendor:sdl3"
+import "vendor:sdl3/ttf"
+
 
 //========================================================================================================================================
 // HOST HELPERS & STATE
@@ -74,13 +76,16 @@ apply_window_flags :: proc "contextless" (fullscreen, borderless, resizable: boo
 // window_shutdown tears down the SDL window + renderer owned by the window module.
 // Host-only. Not exposed to Lua. Safe to call even if init never happened.
 window_shutdown :: proc() {
-	
 	for i in 0..<len(Cursor_Cache) {
 		if Cursor_Cache[i] != nil {
 			sdl.DestroyCursor(Cursor_Cache[i])
 			Cursor_Cache[i] = nil
 		}
 	}
+
+	// Text/font teardown must happen before ttf.Quit().
+	font_shutdown()
+	ttf.Quit()
 
 	if Renderer != nil {
 		sdl.DestroyRenderer(Renderer)
@@ -94,6 +99,7 @@ window_shutdown :: proc() {
 
 	Quit_Requested = false
 }
+
 
 
 //========================================================================================================================================
@@ -123,7 +129,6 @@ lua_window_init :: proc "c" (L: ^lua.State) -> c.int {
 
 	w := lua.L_checkinteger(L, 1)
 	h := lua.L_checkinteger(L, 2)
-
 	title_c := lua.L_checkstring(L, 3)
 
 	fullscreen, borderless, resizable: bool
@@ -146,8 +151,41 @@ lua_window_init :: proc "c" (L: ^lua.State) -> c.int {
 
 	apply_window_flags(fullscreen, borderless, resizable)
 	Quit_Requested = false
+
+	// ------------------------------------------------------------
+	// Text backend comes online here so metrics are valid immediately
+	// ------------------------------------------------------------
+	if !ttf.Init() {
+		fmt.eprintln("TTF_Init failed:", sdl.GetError())
+
+		// rollback window creation
+		if Renderer != nil { sdl.DestroyRenderer(Renderer); Renderer = nil }
+		if Window   != nil { sdl.DestroyWindow(Window);     Window   = nil }
+
+		lua.L_error(L, cstring("window.init: TTF_Init failed"))
+		return 0
+	}
+
+	Text_Engine = ttf.CreateRendererTextEngine(Renderer)
+	if Text_Engine == nil {
+		fmt.eprintln("CreateRendererTextEngine failed")
+
+		ttf.Quit()
+
+		// rollback window creation
+		if Renderer != nil { sdl.DestroyRenderer(Renderer); Renderer = nil }
+		if Window   != nil { sdl.DestroyWindow(Window);     Window   = nil }
+
+		lua.L_error(L, cstring("window.init: CreateRendererTextEngine failed"))
+		return 0
+	}
+
+	// This sets Cell_W/Cell_H (and builds fonts). After this, window metrics getters are valid.
+	apply_font_changes()
+
 	return 0
 }
+
 
 // window.close() -> request quit
 lua_window_close :: proc "c" (L: ^lua.State) -> c.int {

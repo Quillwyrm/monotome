@@ -7,7 +7,6 @@ import "core:strings"
 import "core:c"
 import os  "core:os/os2"
 import sdl "vendor:sdl3"
-import "vendor:sdl3/ttf"
 import lua "luajit"
 
 //========================================================================================================================================
@@ -180,25 +179,6 @@ main :: proc() {
 	// ---------------------------------------------------------------------
 	input_init()
 	defer input_shutdown()
-
-	// ---------------------------------------------------------------------
-	// Fonts / SDL_ttf
-	// ---------------------------------------------------------------------
-	if !ttf.Init() {
-		fmt.eprintln("TTF_Init failed:", sdl.GetError())
-		return
-	}
-	defer ttf.Quit()
-	defer font_shutdown() // must run before ttf.Quit()
-
-	Text_Engine = ttf.CreateRendererTextEngine(Renderer)
-	if Text_Engine == nil {
-		fmt.eprintln("CreateRendererTextEngine failed")
-		return
-	}
-
-	// First-time load (applies font.init/font.set_size/font.load done during runtime.init()).
-	apply_font_changes()
 
 	// ---------------------------------------------------------------------
 	// Timing
