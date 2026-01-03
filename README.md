@@ -6,7 +6,7 @@
 
 It’s aimed at **terminal-style apps**, **experiments**, **toys**, and **small games** that want a textmode look, expressive scripting, and fast iteration.
 
-![demo](demo.gif)
+
 
 ## What you get
 
