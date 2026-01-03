@@ -1,6 +1,6 @@
 # Monotome API Reference
 
-Monotome is a scriptable text-mode rendering engine. It provides a performant host environment (Odin) that handles the windowing, inputs, and rendering loop, while deferring all application logic to a Lua script.
+Monotome is a scriptable text-mode rendering engine. It provides a performant host environment (Odin) that handles the windowing, inputs, and rendering loop, while deferring all application logic to Lua scripts.
 
 The engine exposes 5 core modules to the global `monotome` namespace.
 
@@ -14,10 +14,13 @@ The engine exposes 5 core modules to the global `monotome` namespace.
 The engine expects a specific file layout relative to the executable:
 
 ```text
-/my_game
-  ├── monotome.exe      # The engine executable
-  ├── main.lua          # Entry point script (required)
-  └── fonts/            # Font directory
+/my_app
+  ├── monotome.exe
+  ├── SDL3.dll
+  ├── SDL3_ttf.dll
+  ├── lua/
+  │    └── main.lua
+  └── fonts/
        ├── regular.ttf
        ├── bold.ttf
        ├── italic.ttf

@@ -21,7 +21,6 @@ Full API documentation is available in the [docs/](docs/api_monotome.md) folder.
 
 * [API Reference](docs/api_monotome.md)
 
-
 ## Notes
 
 * Text rendering is **SDL_ttf based** (not a bitmap font sheet).
@@ -33,7 +32,20 @@ Full API documentation is available in the [docs/](docs/api_monotome.md) folder.
 
 **Active Development.** The backend recently migrated from Raylib to SDL3. The core API is stable but subject to change.
 
-## Run it
+## Running Monotome
+
+On Windows, run the monotome.exe:
+
+- `monotome/monotome.exe`
+
+To start building, edit main.lua at:
+
+- `monotome/lua/main.lua`
+
+## Build (Windows)
+
+From inside the `monotome/` folder:
 
 ```sh
-odin run .
+odin build src -out:monotome.exe -resource:src/monotome.rc
+```
