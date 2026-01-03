@@ -2,6 +2,7 @@ local r = monotome.runtime
 local d = monotome.draw
 local w = monotome.window
 local i = monotome.input
+local font = monotome.font
 
 local BG   = {  8, 10, 16, 255 }
 local DIM  = { 130,150,170,255 }
@@ -61,6 +62,11 @@ local cursor_hidden = false
 local clip_last_set = 0
 local clip_last_get = 0
 local clip_err = ""
+
+-- font size test
+local font_err = ""
+local font_req_delta = 0
+local font_step = 1
 
 local blink = 0
 
@@ -259,6 +265,24 @@ function r.update(dt)
     t_acc = utf8_pop(t_acc)
   end
 
+  -- apply requested font size change (requested during draw)
+  if font_req_delta ~= 0 then
+    font_err = ""
+    local ok0, cur = safe_pcall(function() return font.size() end)
+    if ok0 then
+      cur = tonumber(cur) or 1
+      local next_size = cur + font_req_delta
+      if next_size < 1 then next_size = 1 end
+
+      local ok1, err1 = safe_pcall(function() font.set_size(next_size) end)
+      if not ok1 then font_err = err1 end
+    else
+      font_err = cur
+    end
+
+    font_req_delta = 0
+  end
+
   -- move marker
   local step = i.down("lshift") and 4 or 1
   if i.pressed("left")  then x = x - step end
@@ -314,6 +338,29 @@ function r.draw()
 
   local bw = panel_w - 2
   local bx = px + 1
+
+  -- font controls
+  local ok_fs, fs = safe_pcall(function() return font.size() end)
+  fs = ok_fs and (tonumber(fs) or 0) or 0
+
+  d.text(px, row, "font size:", TXT, FB)
+  d.text(px + 11, row, tostring(fs), OK, F)
+  row = row + 1
+
+  if button_row(bx, row, bw, "Font size - (" .. tostring(font_step) .. ")", false) then
+    font_req_delta = font_req_delta - font_step
+  end
+  row = row + 1
+
+  if button_row(bx, row, bw, "Font size + (" .. tostring(font_step) .. ")", false) then
+    font_req_delta = font_req_delta + font_step
+  end
+  row = row + 1
+
+  if font_err ~= "" then
+    d.text(px, row, one_line(font_err, panel_w - 1), BAD, F)
+    row = row + 1
+  end
 
   if button_row(bx, row, bw, "Cursor: cycle (" .. cursor_last .. ")", false) then
     cursor_cycle()

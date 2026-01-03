@@ -1,6 +1,7 @@
 package main
 
 import os  "core:os/os2"
+import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:strings"
@@ -68,6 +69,9 @@ Default_Font_File : [4]string = {
 
 Font_Path : [4]string // Host-side font paths as Odin strings ("" = not set)
 
+Fonts_Dirty : bool = true
+
+
 // ---------------------------------
 // SDL TEXT ENGINE STATE
 // ---------------------------------
@@ -86,12 +90,21 @@ init_font_paths_defaults :: proc() {
 	if err != os.ERROR_NONE {
 		panic("init_font_paths_defaults: get_executable_directory failed")
 	}
+	defer delete(exe_dir)
 
 	for face in 0..<4 {
 		full_path, _ := os.join_path({exe_dir, "fonts", Default_Font_File[face]}, context.allocator)
+
+		// In case this ever runs when paths were already set, avoid leaking.
+		if len(Font_Path[face]) != 0 {
+			delete(Font_Path[face])
+			Font_Path[face] = ""
+		}
+
 		Font_Path[face] = full_path
 	}
 }
+
 
 // compute_font_metrics derives Cell_W and Cell_H from face 0 metrics.
 compute_font_metrics :: proc() {
@@ -139,6 +152,13 @@ destroy_text_cache :: proc() {
 
 // apply_font_changes reloads all faces from Font_Path and recomputes grid metrics.
 apply_font_changes :: proc() {
+	context = runtime.default_context()
+
+	// New behavior: commit only when dirty.
+	if !Fonts_Dirty {
+		return
+	}
+
 	if Font_Size <= 0.0 {
 		panic("apply_font_changes: Font_Size must be > 0")
 	}
@@ -147,10 +167,11 @@ apply_font_changes :: proc() {
 	if len(Font_Path[0]) == 0 {
 		init_font_paths_defaults()
 	}
-	
+
 	// Cached Text objects can hold font-dependent resources.
 	// Destroy them before closing/replacing fonts.
 	destroy_text_cache()
+
 	// Close any existing fonts.
 	for i in 0..<4 {
 		if Active_Font[i] != nil {
@@ -174,7 +195,7 @@ apply_font_changes :: proc() {
 
 		// Keep grid honest for monospace.
 		ttf.SetFontKerning(font, false)
-		
+
 		// Ask SDL_ttf for monochrome/integer-ish hinting.
 		ttf.SetFontHinting(font, .LIGHT_SUBPIXEL)
 
@@ -186,7 +207,11 @@ apply_font_changes :: proc() {
 	}
 
 	compute_font_metrics()
+
+	// Clear dirty only after a successful commit.
+	Fonts_Dirty = false
 }
+
 
 // font_shutdown tears down SDL_ttf resources (text cache, text engine, fonts).
 // Host-only. Must run before ttf.Quit().

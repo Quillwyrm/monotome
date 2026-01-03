@@ -137,7 +137,7 @@ main :: proc() {
 		return
 	}
 
-	main_path, err2 := os.join_path({exe_dir, "main.lua"}, context.temp_allocator)
+	main_path, err2 := os.join_path({exe_dir, "lua", "main.lua"}, context.temp_allocator)
 	if err2 != os.ERROR_NONE {
 		fmt.eprintln("join_path for main.lua failed:", err2)
 		return
@@ -191,13 +191,14 @@ main :: proc() {
 	defer ttf.Quit()
 	defer font_shutdown() // must run before ttf.Quit()
 
-	apply_font_changes()
-
 	Text_Engine = ttf.CreateRendererTextEngine(Renderer)
 	if Text_Engine == nil {
 		fmt.eprintln("CreateRendererTextEngine failed")
 		return
 	}
+
+	// First-time load (applies font.init/font.set_size/font.load done during runtime.init()).
+	apply_font_changes()
 
 	// ---------------------------------------------------------------------
 	// Timing
@@ -231,6 +232,10 @@ main :: proc() {
 		if !call_lua_number(cstring("update"), dt) {
 			break
 		}
+
+		// Commit any font changes requested during update() before drawing.
+		apply_font_changes()
+
 		if !call_lua_noargs(cstring("draw")) {
 			break
 		}

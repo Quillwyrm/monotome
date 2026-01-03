@@ -44,12 +44,19 @@ read_font_paths4 :: proc(L: ^lua.State, idx: lua.Index) {
 			return
 		}
 
+		// Free previous path to avoid leaking when reloading fonts at runtime.
+		if len(Font_Path[face]) != 0 {
+			delete(Font_Path[face])
+			Font_Path[face] = ""
+		}
+
 		s := strings.string_from_ptr(cast(^byte)(path_c), int(path_len))
 		Font_Path[face] = strings.clone(s, context.allocator)
 
 		i += 1
 	}
 }
+
 
 // monotome.font.init(size_px, paths4)
 // size_px : Lua number > 0
@@ -77,8 +84,7 @@ lua_font_init :: proc "c" (L: ^lua.State) -> c.int {
 
 	read_font_paths4(L, lua.Index(2))
 
-	// Fonts will actually be opened later by apply_font_changes()
-	// after TTF_Init has succeeded.
+	Fonts_Dirty = true
 	return 0
 }
 
@@ -99,8 +105,10 @@ lua_font_set_size :: proc "c" (L: ^lua.State) -> c.int {
 	}
 
 	Font_Size = f32(size)
+	Fonts_Dirty = true
 	return 0
 }
+
 
 // monotome.font.load(paths4)
 // Replaces Font_Path[0..3] but does not change Font_Size.
@@ -118,8 +126,11 @@ lua_font_load :: proc "c" (L: ^lua.State) -> c.int {
 	}
 
 	read_font_paths4(L, lua.Index(1))
+
+	Fonts_Dirty = true
 	return 0
 }
+
 
 // local size = monotome.font.size()
 lua_font_size :: proc "c" (L: ^lua.State) -> c.int {
