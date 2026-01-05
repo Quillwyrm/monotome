@@ -134,6 +134,30 @@ grid_cols_rows :: proc "contextless" () -> (cols, rows: int) {
 	return
 }
 
+set_clip_to_grid :: proc "contextless" () {
+	if Renderer == nil {
+		return
+	}
+
+	cols, rows := grid_cols_rows()
+
+	rect: sdl.Rect
+	rect.x = 0
+	rect.y = 0
+
+	// If grid is not ready, clip to nothing (so nothing can draw outside “the grid”).
+	// This preserves the invariant better than disabling clipping.
+	if cols > 0 && rows > 0 {
+		rect.w = c.int(f32(cols) * Cell_W)
+		rect.h = c.int(f32(rows) * Cell_H)
+	} else {
+		rect.w = 0
+		rect.h = 0
+	}
+
+	sdl.SetRenderClipRect(Renderer, &rect)
+}
+
 
 //========================================================================================================================================
 // DRAW API 
@@ -141,7 +165,6 @@ grid_cols_rows :: proc "contextless" () -> (cols, rows: int) {
 //========================================================================================================================================
 
 // lua_draw_clear implements monotome.draw.clear({r,g,b,a}) using SDL clear,
-// and also sets a clip rect to the current cell grid for the rest of the frame.
 lua_draw_clear :: proc "c" (L: ^lua.State) -> c.int {
 	if lua.gettop(L) < 1 {
 		lua.L_error(L, cstring("draw.clear expects 1 argument (rgba table)"))
@@ -157,19 +180,12 @@ lua_draw_clear :: proc "c" (L: ^lua.State) -> c.int {
 	sdl.SetRenderDrawColor(Renderer, color.r, color.g, color.b, color.a)
 	sdl.RenderClear(Renderer)
 
-	// 3) Compute grid size and set clip rect to the cell grid in pixels.
-	cols, rows := grid_cols_rows()
-	if cols > 0 && rows > 0 {
-		rect: sdl.Rect
-		rect.x = 0
-		rect.y = 0
-		rect.w = c.int(f32(cols) * Cell_W)
-		rect.h = c.int(f32(rows) * Cell_H)
-		sdl.SetRenderClipRect(Renderer, &rect)
-	}
+	// 3) Restore the engine’s grid clip invariant for subsequent draw calls.
+	set_clip_to_grid()
 
 	return 0
 }
+
 
 // lua_draw_text implements monotome.draw.text(x, y, text, color, face?).
 lua_draw_text :: proc "c" (L: ^lua.State) -> c.int {

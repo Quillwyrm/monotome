@@ -216,6 +216,9 @@ main :: proc() {
 		// Commit any font changes requested during update() before drawing.
 		apply_font_changes()
 
+		// Engine invariant: always clip to the cell grid before Lua draws.
+		set_clip_to_grid()
+
 		if !call_lua_noargs(cstring("draw")) {
 			break
 		}
