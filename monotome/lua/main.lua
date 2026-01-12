@@ -36,8 +36,7 @@ local watch = {
 local x, y = 10, 8
 
 -- wheel pulse
-local W_PULSE = 0.20
-local w_p = 0
+local W_PULSE = 0.20 local w_p = 0
 local w_dx = 0
 local w_dy = 0
 
@@ -75,10 +74,7 @@ local function utf8_pop(s)
   if n == 0 then return s end
   local j = n
   while j > 0 do
-    local b = s:byte(j)
-    if b < 0x80 or b >= 0xC0 then break end
-    j = j - 1
-  end
+    local b = s:byte(j) if b < 0x80 or b >= 0xC0 then break end j = j - 1 end
   if j <= 0 then return "" end
   return s:sub(1, j - 1)
 end

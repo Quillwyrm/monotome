@@ -30,6 +30,10 @@ register_lua_api :: proc() {
 	lua.newtable(Lua)                         // stack: [monotome, runtime]
 	lua.setfield(Lua, -2, cstring("runtime")) // monotome.runtime = runtime; stack: [monotome]
 
+	// monotome.filesystem = {}
+	register_filesystem_api(Lua)                        // stack: [monotome, filesystem]
+	lua.setfield(Lua, -2, cstring("filesystem"))        // monotome.filesystem = filesystem; stack: [monotome]
+
 	// monotome.draw = {}
 	register_draw_api(Lua)                    // stack: [monotome, draw]
 	lua.setfield(Lua, -2, cstring("draw"))    // monotome.draw = draw; stack: [monotome]
@@ -102,6 +106,45 @@ call_lua_number :: proc(fn: cstring, x: f64) -> bool {
 	return ok
 }
 
+prepend_package_path :: proc(L: ^lua.State, exe_dir: string) {
+	// Build:
+	//   <exe_dir>/lua/?.lua;<exe_dir>/lua/?/init.lua;<old package.path>
+	p1, err1 := os.join_path({exe_dir, "lua", "?.lua"}, context.temp_allocator)
+	if err1 != os.ERROR_NONE {
+		fmt.eprintln("join_path for lua/?.lua failed:", err1)
+		return
+	}
+	p2, err2 := os.join_path({exe_dir, "lua", "?", "init.lua"}, context.temp_allocator)
+	if err2 != os.ERROR_NONE {
+		fmt.eprintln("join_path for lua/?/init.lua failed:", err2)
+		return
+	}
+
+	p1_c := strings.clone_to_cstring(p1, context.temp_allocator)
+	p2_c := strings.clone_to_cstring(p2, context.temp_allocator)
+
+	// package.path = p1..";"..p2..";"..package.path
+	lua.getglobal(L, cstring("package"))              // [package]
+	lua.getfield(L, -1, cstring("path"))             // [package, old_path]
+
+	old_len: c.size_t
+	old_c := lua.tolstring(L, -1, &old_len)
+
+	lua.remove(L, -1)                                 // [package]
+
+	lua.pushstring(L, p1_c)                           // [package, p1]
+	lua.pushstring(L, cstring(";"))                   // [package, p1, ";"]
+	lua.pushstring(L, p2_c)                           // [package, p1, ";", p2]
+	lua.pushstring(L, cstring(";"))                   // [package, p1, ";", p2, ";"]
+	lua.pushlstring(L, old_c, old_len)                // [package, p1, ";", p2, ";", old]
+
+	lua.concat(L, 5)                                  // [package, new_path]
+	lua.setfield(L, -2, cstring("path"))              // package.path = new_path; pops value
+
+	lua.settop(L, 0)                                  // []
+}
+
+
 //========================================================================================================================================
 // MAIN RUNTIME ENTRY
 //========================================================================================================================================
@@ -135,6 +178,8 @@ main :: proc() {
 		fmt.eprintln("get_executable_directory failed:", err)
 		return
 	}
+
+	prepend_package_path(Lua, exe_dir)
 
 	main_path, err2 := os.join_path({exe_dir, "lua", "main.lua"}, context.temp_allocator)
 	if err2 != os.ERROR_NONE {
